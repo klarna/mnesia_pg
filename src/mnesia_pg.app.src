@@ -1,0 +1,12 @@
+{application, mnesia_pg,
+ [
+  {description, "PG plugin for mnesia"},
+  {vsn, "1.0"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, {mnesia_pg_app, []}},
+  {env, [{pool_size, 3}, {pg_user, "kred"}, {pg_pwd, "derk"}]}
+ ]}.
