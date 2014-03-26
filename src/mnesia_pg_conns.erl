@@ -2,13 +2,13 @@
 
 -behaviour(gen_server).
 -export([start_link/0]).
--export([alloc/1, free/1, ref/0]).
+-export([alloc/1, free/1, ref/0, state/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, code_change/3, terminate/2]).
 
 start_link() ->
-    {ok, N} = application:get_env(pool_size),
-    {ok, User} = application:get_env(pg_user),
-    {ok, Pwd} = application:get_env(pg_pwd),
+    {ok, N} = application:get_env(mnesia_pg, pool_size),
+    {ok, User} = application:get_env(mnesia_pg, pg_user),
+    {ok, Pwd} = application:get_env(mnesia_pg, pg_pwd),
     gen_server:start_link({local, conn_pool}, ?MODULE, [N, User, Pwd], []).
 
 open_connections(N, User, Pwd) ->
@@ -40,6 +40,9 @@ free(Conn) ->
 ref() ->
     gen_server:call(conn_pool, get_ref).
 
+state() ->
+    gen_server:call(conn_pool, get_state).
+
 init([N, User, Pwd]) ->
     ConnL = open_connections(N, User, Pwd),
     process_flag(trap_exit, true),
@@ -54,6 +57,8 @@ terminate(_, ConnL) ->
 
 handle_call(get_ref, _From, State) ->
     {reply, random:uniform(100000000), State};
+handle_call(get_state, _From, State) ->
+    {reply, State, State};
 handle_call({alloc, _Pid}, _From, {[Conn|ConnL], WaitL}) ->
     {reply, Conn, {ConnL, WaitL}};
 handle_call({alloc, Pid}, _From, {[], WaitL}) ->
