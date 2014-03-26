@@ -1,7 +1,6 @@
 %%
 %% %CopyrightBegin%
 %%
-%% TODO
 %% Klarna Copyright Text
 %%
 %% %CopyrightEnd%
@@ -420,7 +419,7 @@ match_delete(Alias, Tab, Pat) when is_tuple(Pat) ->
 %% Note: prev for a set in mnesia/ets equals next (sic!)
 next(Alias, Tab0, Key) ->
     {C, Tab} = get_ref(Alias, Tab0),
-    {ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, "where erlkey > $1 order by erlkey limit 1"], [encode_key(Key)]),
+    {ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, " where erlkey > $1 order by erlkey limit 1"], [encode_key(Key)]),
     mnesia_pg_conns:free(C),
     case (Res) of
 	[] ->
@@ -431,7 +430,7 @@ next(Alias, Tab0, Key) ->
 
 prev(Alias, Tab0, Key) ->
     {C, Tab} = get_ref(Alias, Tab0),
-    {ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, "where erlkey < $1 order by erlkey desc limit 1"], [encode_key(Key)]),
+    {ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, " where erlkey < $1 order by erlkey desc limit 1"], [encode_key(Key)]),
     mnesia_pg_conns:free(C),
     case (Res) of
 	[] ->
@@ -782,7 +781,6 @@ is_wild(_) ->
 %% PG interface
 %% Each table has 4 columns: sha encoded key encoded value change time
 %% erlsha and erlkey are indexed
-%% TODO: can a list of strings be passed to pgsql?
 open_cursor(C, Tab) ->
     CursorName = "cursor_" ++ Tab ++ mnesia_pg_conns:ref(),
     {ok, [], []} = pgsql:squery(C, "begin"),
@@ -857,8 +855,8 @@ create_table(Alias, Tab0, _Props) ->
 				    "EXCEPTION WHEN unique_violation THEN\n",
 				    " UPDATE ", Tab, " SET erlkey=ekey, erlval=eval, change_time=current_timestamp WHERE erlsha = pkey;\n",
 				    "END;\n", "$$\n", "LANGUAGE plpgsql;"]),
-    {ok, [], []} = pgsql:squery(C, ["create or replace index ", Tab, "_term_idx ON " ++ Tab ++ " USING btree (erlkey)"]),
-    {ok, [], []} = pgsql:squery(C, ["create or replace unique index ", Tab, "_sha_idx ON ", Tab, " USING hash (erlsha)"]),
+    {ok, [], []} = pgsql:squery(C, ["create or replace index ", Tab, "_term_idx ON " ++ Tab ++ " using btree (erlkey)"]),
+    {ok, [], []} = pgsql:squery(C, ["create or replace unique index ", Tab, "_sha_idx ON ", Tab, " using hash (erlsha)"]),
     mnesia_pg_conns:free(C).
 
 delete_table(Alias, Tab0) ->
