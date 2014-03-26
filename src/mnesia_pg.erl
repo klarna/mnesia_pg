@@ -890,9 +890,9 @@ tabname({Tab, index, {{Pos},_}}) ->
 tabname({Tab, index, {Pos,_}}) ->
     "ix_" ++ atom_to_list(Tab) ++ "_" ++ integer_to_list(Pos);
 tabname({Tab, retainer, Name}) ->
-    "ret_" + atom_to_list(Tab) ++ "_" ++ retainername(Name);
+    "ret_" ++ atom_to_list(Tab) ++ "_" ++ retainername(Name);
 tabname(Tab) when is_atom(Tab) ->
-    "tab_" + atom_to_list(Tab).
+    "tab_" ++ atom_to_list(Tab).
 
 retainername(Name) when is_atom(Name) ->
     atom_to_list(Name);
