@@ -117,12 +117,6 @@
 %% 2    = before data
 %% >= 8 = data
 
--define(INFO_START, 0).
--define(INFO_TAG, 1).
--define(DATA_START, 2).
--define(BAG_CNT, 32).   % Number of bits used for bag object counter
--define(MAX_BAG, 16#FFFFFFFF).
-
 -ifdef(DEBUG).
 -define(dbg(E), E).
 -else.
@@ -168,8 +162,9 @@ show_table(Alias, Tab) ->
     show_table(Alias, Tab, 100).
 
 show_table(Alias, Tab, Limit) ->
-    Ref = get_ref(Alias, Tab),
-    with_iterator(Ref, fun(Curs) -> i_show_table(Curs, Limit) end).
+    {C, _} = Ref = get_ref(Alias, Tab),
+    with_iterator(Ref, fun(Curs) -> i_show_table(Curs, Limit) end),
+    mnesia_pg_conns:free(C).
 
 %% PRIVATE
 
@@ -178,16 +173,9 @@ i_show_table(_, 0) ->
 i_show_table(Curs, Limit) ->
     case fetch_next(Curs) of
         {ok, EncKey, EncVal} ->
-            {Type,Val} =
-                case EncKey of
-                    << ?INFO_TAG, K/binary >> ->
-                        {info,{decode_key(K),decode_val(EncVal)}};
-                    _ ->
-                        K = decode_key(EncKey),
-                        V = decode_val(EncVal),
-                        {data,{K,V}}
-                end,
-            io:fwrite("~p: ~p~n", [Type, Val]),
+	    K = decode_key(EncKey),
+	    V = decode_val(EncVal),
+            io:fwrite("~p: ~p~n", [K, V]),
             i_show_table(Curs, Limit-1);
         _ ->
             ok
@@ -367,50 +355,46 @@ receive_data(Data, Alias, Tab, _Sender, State) ->
 receive_done(_Alias, _Tab, _Sender, _State) ->
     ok.
 
-%% End of table synch protocol
-%% ===========================================================
-
-%% PRIVATE
-
 chunk_fun() ->
     fun(Cont) ->
 	    select(Cont)
     end.
 
-%% low-level accessor callbacks.
+%% End of table synch protocol
+%% ===========================================================
 
-delete(_Alias, Tab, Key) ->
-    delete_from(Tab, encode_primary_key(Key)).
+delete(Alias, Tab, Key) ->
+    delete_from(Alias, Tab, encode_primary_key(Key)).
 
 %% Not relevant for an ordered_set
 fixtable(_Alias, _Tab, _Bool) ->
     true.
 
-insert(_Alias, Tab, Obj) ->
+insert(Alias, Tab, Obj) ->
     Pos = keypos(Tab),
     Key = element(Pos, Obj),
     PKey = encode_primary_key(Key),	% lookup via index
     TKey = encode_key(Key),		% sorted via index
     Val = encode_val(Obj),
-    upsert_into(Tab, PKey, TKey, Val).
+    upsert_into(Alias, Tab, PKey, TKey, Val).
 
-lookup(Alias, Tab, Key) ->
-    {C, Tab} = get_ref(Alias, Tab),
+lookup(Alias, Tab0, Key) ->
+    {C, Tab} = get_ref(Alias, Tab0),
     PKey = encode_primary_key(Key),
-    {ok, N, _, Res} = pgsql:equery(C, "select from " ++ Tab ++ " where erlsha=$1", [PKey]),
+    {ok, N, _, Res} = pgsql:equery(C, ["select * from ", Tab, " where erlsha=$1"], [PKey]),
     mnesia_pg_conns:free(C),
     case (N) of
 	0 ->
 	    [];
 	1 ->
-	    [Row] = Res,
+	    [Row] = Res,			% Row = (pkey, tkey, val)
 	    [decode_val(lists:nth(3, Row))]
     end.
 
-match_delete(_Alias, Tab, Pat) when is_atom(Pat) ->
+match_delete(Alias, Tab, Pat) when is_atom(Pat) ->
     case is_wild(Pat) of
 	true ->
-	    delete_all(Tab),
+	    delete_all(Alias, Tab),
 	    ok;
 	false ->
 	    %% can this happen??
@@ -421,63 +405,60 @@ match_delete(Alias, Tab, Pat) when is_tuple(Pat) ->
     Key = element(KP, Pat),
     case is_wild(Key) of
 	true ->
-	    delete_all(Tab),
+	    delete_all(Alias, Tab),
 	    ok;
 	false ->
 	    delete_from_pattern(Alias, Tab, Pat)
     end,
     ok.
 
-%% These are NOT fast. We should use a cursor, however, the mnesia API only passes us a table name and a key,
-%% and we have no trivial way of keeping a cursor in cases these functions are used for iterating through a table.
-%% Hence, we end up searching for the row each time, using select. Blah!
-%% Tracking this 'magically' will hurt a bit.
-%% The simplest optimization is to add a separate index on erlkey that is ordered and that we can rely on when scanning forward/backward
-next(Alias, Tab, Key) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    {ok, _, Res} = pgsql:equery(C, "select erlkey from " ++ Tab ++ "where erlkey > $1 order by erlkey limit 1", [encode_key(Key)]),
+%% It is tempting to use a cursor for next/prev, however, the ets semantics, used by mnesia,
+%% imply that any call to next (prev) may position itself right after (before) the given key, 
+%% which may not always be the next row in logical order. As there is no open call,
+%% it is not clear how to open a cursor that can be leveraged to efficiently find
+%% a proper segment to iterate through.
+%% Note: prev for a set in mnesia/ets equals next (sic!)
+next(Alias, Tab0, Key) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    {ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, "where erlkey > $1 order by erlkey limit 1"], [encode_key(Key)]),
     mnesia_pg_conns:free(C),
     case (Res) of
 	[] ->
 	    '$end_of_table';
-	1 ->
-	    [{TKey}] = Res,
+	[{TKey}] ->				%check pattern
 	    decode_key(TKey)
     end.
 
-prev(Alias, Tab, Key) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    {ok, _, Res} = pgsql:equery(C, "select erlkey from " ++ Tab ++ "where erlkey < $1 order by erlkey limit 1", [encode_key(Key)]),
+prev(Alias, Tab0, Key) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    {ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, "where erlkey < $1 order by erlkey desc limit 1"], [encode_key(Key)]),
     mnesia_pg_conns:free(C),
     case (Res) of
 	[] ->
 	    '$end_of_table';
-	1 ->
-	    [{TKey}] = Res,
+	[{TKey}] ->
 	    decode_key(TKey)
     end.
 
-first(Alias, Tab) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    {ok, _, Res} = pgsql:squery(C, "select erlkey from " ++ Tab ++ " order by erlkey limit 1"),
+first(Alias, Tab0) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    {ok, _, Res} = pgsql:squery(C, ["select erlkey from ", Tab, " order by erlkey limit 1"]),
     mnesia_pg_conns:free(C),
     case (Res) of
 	[] ->
 	    '$end_of_table';
-	1 ->
-	    [{TKey}] = Res,
+	[{TKey}] ->
 	    decode_key(TKey)
     end.
 
-last(Alias, Tab) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    {ok, _, Res} = pgsql:squery(C, "select erlkey from " ++ Tab ++ " order by erlkey desc limit 1"),
+last(Alias, Tab0) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    {ok, _, Res} = pgsql:squery(C, ["select erlkey from ", Tab, " order by erlkey desc limit 1"]),
     mnesia_pg_conns:free(C),
     case (Res) of
 	[] ->
 	    '$end_of_table';
-	1 ->
-	    [{TKey}] = Res,
+	[{TKey}] ->
 	    decode_key(TKey)
     end.
 
@@ -496,14 +477,16 @@ select(Alias, Tab, Ms) ->
 	    '$end_of_table'
     end.
 
-select(Alias, Tab, Ms, Limit) when Limit==infinity; is_integer(Limit) ->
-    Ref = get_ref(Alias, Tab),
-    do_select(Ref, Tab, Ms, Limit).
+select(Alias, Tab0, Ms, Limit) when Limit==infinity; is_integer(Limit) ->
+    {C, _} = Ref = get_ref(Alias, Tab0),
+    do_select(Ref, Tab0, Ms, Limit),
+    mnesia_pg_conns:free(C).
 
-slot(Alias, Tab, Pos) when is_integer(Pos), Pos >= 0 ->
-    Ref = get_ref(Alias, Tab),
+slot(Alias, Tab0, Pos) when is_integer(Pos), Pos >= 0 ->
+    {C, _} = Ref = get_ref(Alias, Tab0),
     F = fun(Curs) -> slot_iter_set(fetch_next(Curs), Curs, 0, Pos) end,
-    with_iterator(Ref, F);
+    with_iterator(Ref, F),
+    mnesia_pg_conns:free(C);
 slot(_, _, _) ->
     error(badarg).
 
@@ -520,22 +503,24 @@ slot_iter_set(Res, _, _, _) when element(1, Res) =/= ok ->
 
 %% update value of key by incrementing
 %% need select for update since the value in erlval is an int encoded as a binary
-update_counter(Alias, Tab, Key, Val) when is_integer(Val) ->
-    {C, Tab} = get_ref(Alias, Tab),
+update_counter(Alias, Tab0, Key, Val) when is_integer(Val) ->
+    {C, Tab} = get_ref(Alias, Tab0),
     PKey = encode_primary_key(Key),
     {ok, [], []} = pgsql:squery(C, "begin"),
-    {ok, N, _, Res} = pgsql:equery(C, "select from " ++ Tab ++ " where erlsha=$1 for update", [PKey]),
+    {ok, N, _, Res} = pgsql:equery(C, ["select from ", Tab, " where erlsha=$1 for update"], [PKey]),
     case (N) of
 	0 ->
+	    pgsql:squery(C, "rollback"),
 	    Return = badarg;
 	1 ->
 	    [Row] = Res,
 	    case decode_val(lists:nth(3, Row)) of
 		{_, _, Old} when is_integer(Old) ->
-		    New = Old+Val,
-		    Return = New,
-		    pgsql:equery(C, "update " ++ Tab ++ " set erlval=$2, change_time = current_timestamp where erlsha=$1", [PKey, encode_val(New)]);
+		    Return = Old+Val,
+		    pgsql:equery(C, ["update ", Tab, " set erlval=$2, change_time=current_timestamp where erlsha=$1"], [PKey, encode_val(Return)]),
+		    pgsql:squery(C, "commit");
 		_ ->
+		    pgsql:squery(C, "rollback"),
 		    Return = badarg
 	    end
     end,
@@ -587,38 +572,24 @@ do_select(Ref, Tab, MS, Limit) ->
 
 do_select(Ref, Tab, MS, AccKeys, Limit) when is_boolean(AccKeys) ->
     Keypat = keypat(MS, keypos(Tab)),
-    Sel = #sel{tab = Tab,
-	       ref = Ref,
+    Sel = #sel{ref = Ref,
 	       keypat = Keypat,
 	       ms = MS,
 	       compiled_ms = ets:match_spec_compile(MS),
-	       key_only = needs_key_only(MS),
 	       limit = Limit},
     {Pfx, _} = Keypat,
     case (Pfx) of
 	<<>> ->
-	    with_iterator(Ref, fun(Curs) -> i_do_select(Curs, Sel, AccKeys, []) end);
+	    with_iterator(Ref,
+			  fun(Curs) ->
+				  select_traverse(fetch_next(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, [])
+			  end);
 	_ ->
-	    with_positioned_iterator(Ref, Pfx, fun(Curs) -> i_do_select(Curs, Sel, AccKeys, []) end)
+	    with_positioned_iterator(Ref, Pfx,
+				     fun(Curs) ->
+					     select_traverse(fetch_next(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, [])
+				     end)
     end.
-
-i_do_select(Curs, #sel{keypat = {Pfx, _KP},
-                    compiled_ms = MS,
-                    limit = Limit} = Sel, AccKeys, Acc) ->
-    select_traverse(fetch_next(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, Acc).
-
-needs_key_only([{HP,_,Body}]) ->
-    BodyVars = lists:flatmap(fun extract_vars/1, Body),
-    %% Note that we express the conditions for "needs more than key" and negate.
-    not(wild_in_body(BodyVars) orelse
-	case bound_in_headpat(HP) of
-	    {all,V} -> lists:member(V, BodyVars);
-	    none    -> false;
-	    Vars    -> any_in_body(lists:keydelete(2,1,Vars), BodyVars)
-	end);
-needs_key_only(_) ->
-    %% don't know
-    false.
 
 extract_vars([H|T]) ->
     extract_vars(H) ++ extract_vars(T);
@@ -636,35 +607,8 @@ extract_vars(T) when is_atom(T) ->
 extract_vars(_) ->
     [].
 
-any_in_body(Vars, BodyVars) ->
-    lists:any(fun({_,Vs}) ->
-		      intersection(Vs, BodyVars) =/= []
-	      end, Vars).
-
 intersection(A,B) when is_list(A), is_list(B) ->
     A -- (A -- B).
-
-wild_in_body(BodyVars) ->
-    intersection(BodyVars, ['$$','$_']) =/= [].
-
-bound_in_headpat(HP) when is_atom(HP) ->
-    {all, HP};
-bound_in_headpat(HP) when is_tuple(HP) ->
-    [_|T] = tuple_to_list(HP),
-    map_vars(T, 2);
-bound_in_headpat(_) ->
-    %% this is not the place to throw an exception
-    none.
-
-map_vars([H|T], P) ->
-    case extract_vars(H) of
-	[] ->
-	    map_vars(T, P+1);
-	Vs ->
-	    [{P, Vs}|map_vars(T, P+1)]
-    end;
-map_vars([], _) ->
-    [].
 
 select_traverse({ok, K, V}, Curs, Limit, Pfx, MS, Sel,
 		AccKeys, Acc) ->
@@ -702,9 +646,6 @@ is_prefix(A, B) when is_binary(A), is_binary(B) ->
 	    false
     end.
 
-
-
-
 decr(I) when is_integer(I) ->
     I-1;
 decr(infinity) ->
@@ -725,7 +666,7 @@ keypat([{HeadPat,Gs,_}|_], KeyPos) when is_tuple(HeadPat) ->
     KP      = element(KeyPos, HeadPat),
     KeyVars = extract_vars(KP),
     Guards  = relevant_guards(Gs, KeyVars),
-    Pfx     = mnesia_sext:prefix(KP),
+    Pfx     = mnesia_sext:prefix_sb32(KP),
     {Pfx, [{KP, Guards, [true]}]};
 keypat(_, _) ->
     {<<>>, [{'_',[],[true]}]}.
@@ -781,31 +722,25 @@ keypos(Tab) when is_atom(Tab) ->
     2.
 
 encode_primary_key(Key) ->
-    crypto:sha(term_to_binary(Key)).
+    <<PK:160>> = crypto:sha(term_to_binary(Key)),
+    PK.
 
 encode_key(Key) ->
-    mnesia_sext:encode(Key).
+    mnesia_sext:encode_sb32(Key).
 
 decode_key(CodedKey) ->
-    case mnesia_sext:partial_decode(CodedKey) of
-	{full, Result, _} ->
-	    Result;
-	_ ->
-	    error(badarg, CodedKey)
-    end.
+    mnesia_sext:decode_sb32(CodedKey).
 
 encode_val(Val) ->
-    term_to_binary(Val).
+    term_to_binary(Val,[{compressed,5},{minor_version, 1}]).
 
 decode_val(CodedVal) ->
     binary_to_term(CodedVal).
 
-get_ref(_Alias, Tab) ->
-    mnesia_pg_conns:alloc(Tab).			% returns a connection
-
-fold(Alias, Tab, Fun, Acc, MS, N) ->
-    Ref = get_ref(Alias, Tab),
-    do_fold(Ref, Tab, Fun, Acc, MS, N).
+fold(Alias, Tab0, Fun, Acc, MS, N) ->
+    {C, _} = Ref = get_ref(Alias, Tab0),
+    do_fold(Ref, Tab0, Fun, Acc, MS, N),
+    mnesia_pg_conns:free(C).
 
 do_fold(Ref, Tab, Fun, Acc, MS, N) ->
     {AccKeys, F} =
@@ -846,27 +781,25 @@ is_wild(_) ->
 
 %% PG interface
 %% Each table has 4 columns: sha encoded key encoded value change time
-%% an index is created on erlsha
-%% encoded key can be ordered by asc, which adheres to erlang ordering
-
+%% erlsha and erlkey are indexed
+%% TODO: can a list of strings be passed to pgsql?
 open_cursor(C, Tab) ->
     CursorName = "cursor_" ++ Tab ++ mnesia_pg_conns:ref(),
     {ok, [], []} = pgsql:squery(C, "begin"),
-    {ok, [], []} = pgsql:squery(C, "declare " ++ CursorName ++ " cursor for select * from " ++ Tab ++ " order by erlkey asc"),
+    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select * from ", Tab, " order by erlkey asc"]),
     {C, CursorName}.
 
 open_cursor(C, Tab, Pat) ->
     CursorName = "cursor_" ++ Tab ++ mnesia_pg_conns:ref(),
     {ok, [], []} = pgsql:squery(C, "begin"),
-    {ok, [], []} = pgsql:squery(C, "declare " ++ CursorName ++ " cursor for select * from " ++ Tab ++ " where erlkey like '" ++ Pat ++ "%' order by erlkey asc"),
+    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select * from ", Tab, " where erlkey like '", Pat, "%' order by erlkey asc"]),
     {C, CursorName}.
 
 close_cursor({C, CursorName}) ->
-    pgsql:squery(C, "close " ++ CursorName),
-    mnesia_pg_conns:free(C).
+    pgsql:squery(C, ["close ", CursorName]).
 
 fetch_next({C, CursorName}) ->
-    Res = pgsql:squery(C, "fetch next from " ++ CursorName),
+    Res = pgsql:squery(C, ["fetch next from ", CursorName]),
     case (Res) of
 	{ok, 0} ->
 	    void;
@@ -874,23 +807,22 @@ fetch_next({C, CursorName}) ->
 	    {ok, lists:nth(2, R), lists:nth(3, R)}
     end.
 
-%% TODO: replace with call to upsert function, as 
-%% select mnesia_upsert($1,$2,$3,CURRENT_TIMESTAMP)
-upsert_into(Tab, PKey, TKey, Val) ->
-    {C, Tab} = mnesia_pg_conns:alloc(Tab),    
-    pgsql:equery(C, "insert into " ++ Tab ++ " (erlsha,erlkey,erlval,change_time) values ($1,$2,$3,CURRENT_TIMESTAMP)", [PKey,TKey,Val]),
+upsert_into(Alias, Tab0, PKey, TKey, Val) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    %pgsql:equery(C, "insert into " ++ Tab ++ " (erlsha,erlkey,erlval,change_time) values ($1,$2,$3,CURRENT_TIMESTAMP)", [PKey,TKey,Val]),
+    pgsql:equery(C, ["select upsert_", Tab, "($1,$2,$3)"], [PKey,TKey,Val]),
     mnesia_pg_conns:free(C).
 
-delete_from(Tab, PKey) ->
-    {C, Tab} = mnesia_pg_conns:alloc(Tab),    
-    {ok, N} = pgsql:equery(C, "delete from " ++ Tab ++ " where erlsha=$1", [PKey]),
+delete_from(Alias, Tab0, PKey) ->
+    {C, Tab} = get_ref(Alias, Tab0),    
+    {ok, N} = pgsql:equery(C, ["delete from ", Tab, " where erlsha=$1"], [PKey]),
     mnesia_pg_conns:free(C),
     N.
 
-delete_list(Tab, PKeyList) ->
-    {C, Tab} = mnesia_pg_conns:alloc(Tab),
+delete_list(Alias, Tab0, PKeyList) ->
+    {C, Tab} = get_ref(Alias, Tab0),
     N = lists:foldl(fun(PKey, Sum) ->
-			    {ok, N} = pgsql:equery(C, "delete from " ++ Tab ++ " where erlsha=$1", [PKey]),
+			    {ok, N} = pgsql:equery(C, ["delete from ", Tab, " where erlsha=$1"], [PKey]),
 			    Sum + N
 		    end,
 		    0,
@@ -898,42 +830,43 @@ delete_list(Tab, PKeyList) ->
     mnesia_pg_conns:free(C),
     N.
 
-delete_all(Tab) ->
-    {C, Tab} = mnesia_pg_conns:alloc(Tab),    
-    pgsql:squery(C, "delete from " ++ Tab),
+delete_all(Alias, Tab0) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    pgsql:squery(C, ["delete from ", Tab]),
     mnesia_pg_conns:free(C).
 
-delete_from_pattern(Alias, Tab, Pat) ->
-    Ref = get_ref(Alias, Tab),
+delete_from_pattern(Alias, Tab0, Pat) ->
+    {C, _} = Ref = get_ref(Alias, Tab0),
     Fun = fun(_, Key, Acc) -> [Key|Acc] end,
-    Keys = do_fold(Ref, Tab, Fun, [], [{Pat,[],['$_']}], 30),
+    Keys = do_fold(Ref, Tab0, Fun, [], [{Pat,[],['$_']}], 30),
     if Keys == [] ->
 	    ok;
        true ->
-	    delete_list(Tab, Keys),
+	    delete_list(Alias, Ref, Keys),
 	    ok
-    end.
-
-create_table(Alias, Tab, _Props) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    pgsql:squery(C, "drop table " ++ Tab),
-    {ok, [], []} = pgsql:squery(C, "create table " ++ Tab ++ "( erlsha numeric, erlkey character varying(2048), erlval bytea, change_time timestamp )"),
-    {ok, [], []} = pgsql:squery(C, "create or replace function upsert_" ++ Tab ++ "(pkey numeric, ekey character varying, eval bytea) RETURNS void AS\n" ++
-			 "$$\n" ++
-			 "BEGIN\n" ++
-			 " INSERT INTO " ++ Tab ++ " VALUES (pkey, ekey, eval, current_timestamp);\n" ++
-			 "EXCEPTION WHEN unique_violation THEN\n" ++
-			 " UPDATE " ++ Tab ++ " SET erlval = eval, change_time = current_timestamp WHERE erlsha = pkey;\n" ++
-			 "END;\n" ++
-			 "$$\n" ++
-			 "LANGUAGE plpgsql;"),
-    {ok, [], []} = pgsql:squery(C, "create or replace index " ++ Tab ++ "_term_idx ON " ++ Tab ++ " USING btree (erlkey)"),
-    {ok, [], []} = pgsql:squery(C, "create or replace unique index " ++ Tab ++ "_sha_idx ON " ++ Tab ++ " USING hash (erlsha)"),
+    end,
     mnesia_pg_conns:free(C).
 
-delete_table(Alias, Tab) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    pgsql:squery(C, "drop table " ++ Tab),
+%% TODO: check that Tab syntax is compatible with postgresql
+create_table(Alias, Tab0, _Props) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    pgsql:squery(C, ["drop table ", Tab]),
+    {ok, [], []} = pgsql:squery(C, ["create table ", Tab, "( erlsha numeric, erlkey character varying(2048), erlval bytea, change_time timestamp )"]),
+    {ok, [], []} = pgsql:squery(C, ["create or replace function upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea) RETURNS void AS\n",
+				    "$$\n", "BEGIN\n", " INSERT INTO ", Tab, " VALUES (pkey, ekey, eval, current_timestamp);\n",
+				    "EXCEPTION WHEN unique_violation THEN\n",
+				    " UPDATE ", Tab, " SET erlkey=ekey, erlval=eval, change_time=current_timestamp WHERE erlsha = pkey;\n",
+				    "END;\n", "$$\n", "LANGUAGE plpgsql;"]),
+    {ok, [], []} = pgsql:squery(C, ["create or replace index ", Tab, "_term_idx ON " ++ Tab ++ " USING btree (erlkey)"]),
+    {ok, [], []} = pgsql:squery(C, ["create or replace unique index ", Tab, "_sha_idx ON ", Tab, " USING hash (erlsha)"]),
+    mnesia_pg_conns:free(C).
+
+delete_table(Alias, Tab0) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    pgsql:squery(C, ["drop index ", Tab, "_term_idx"]),
+    pgsql:squery(C, ["drop index ", Tab, "_sha_idx"]),
+    pgsql:squery(C, ["drop function upsert_", Tab]),
+    pgsql:squery(C, ["drop table ", Tab]),
     mnesia_pg_conns:free(C).
 
 load_table(_Alias, _Tab, _LoadReason, _Opts) ->
@@ -942,10 +875,34 @@ load_table(_Alias, _Tab, _LoadReason, _Opts) ->
 close_table(_Alias, _Tab) ->
     ok.
 
-count_table(Alias, Tab) ->
-    {C, Tab} = get_ref(Alias, Tab),
-    {ok, _, [{X}]} = pgsql:squery(C, "select count(*) from " ++ Tab),
+count_table(Alias, Tab0) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    {ok, _, [{X}]} = pgsql:squery(C, ["select count(*) from ", Tab]),
     mnesia_pg_conns:free(C),
     list_to_integer(binary_to_list(X)).
+
+get_ref(_Alias, Tab) ->
+    C = mnesia_pg_conns:alloc(Tab),
+    {C, tabname(Tab)}.
+
+tabname({Tab, index, {{Pos},_}}) ->
+     "ix2_" ++ atom_to_list(Tab) ++ "_" ++ atom_to_list(Pos);
+tabname({Tab, index, {Pos,_}}) ->
+    "ix_" ++ atom_to_list(Tab) ++ "_" ++ integer_to_list(Pos);
+tabname({Tab, retainer, Name}) ->
+    "ret_" + atom_to_list(Tab) ++ "_" ++ retainername(Name);
+tabname(Tab) when is_atom(Tab) ->
+    "tab_" + atom_to_list(Tab).
+
+retainername(Name) when is_atom(Name) ->
+    atom_to_list(Name);
+retainername(Name) when is_list(Name) ->
+    try binary_to_list(list_to_binary(Name))
+    catch
+	error:_ ->
+	    lists:flatten(io_lib:write(Name))
+    end;
+retainername(Name) ->
+    lists:flatten(io_lib:write(Name)).
 
 %%%impl_doc_include

@@ -25,13 +25,13 @@ alloc(Tab) ->
 	wait ->
 	    receive
 		{new_conn, C2} ->
-		    {C2, Tab}
+		    C2
 	    after 1000 ->
 		    io:fwrite("ERR: failed to allocate PG connection for table ~p~n", [Tab]),
 		    void			% mnesia abort?
 	    end;
 	_ ->
-	    {C, Tab}
+	    C
     end.
 
 free(Conn) ->
