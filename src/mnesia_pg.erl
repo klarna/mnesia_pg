@@ -393,7 +393,7 @@ lookup(Alias, Tab0, Key) ->
 		[];
 	    1 ->
 		[Row] = Rs,			% Row = (pkey, tkey, val)
-		[decode_val(lists:nth(3, Row))]
+		[decode_val(element(3, Row))]
 	end
     after
 	mnesia_pg_conns:free(C)
@@ -541,7 +541,7 @@ update_counter(Alias, Tab0, Key, Val) when is_integer(Val) ->
 		Return = badarg;
 	    1 ->
 		[Row] = Res,
-		case decode_val(lists:nth(3, Row)) of
+		case decode_val(element(3, Row)) of
 		    {_, _, Old} when is_integer(Old) ->
 			Return = Old+Val,
 			pgsql:equery(C, ["update ", Tab, " set erlval=$2, change_time=current_timestamp where erlsha=$1"], [PKey, encode_val(Return)]),
@@ -835,7 +835,7 @@ fetch_next({C, CursorName}) ->
 	{ok, 0} ->
 	    void;
 	{ok, 1, _, R} ->
-	    {ok, lists:nth(2, R), lists:nth(3, R)}
+	    {ok, element(2, R), element(3, R)}
     end.
 
 %pgsql:equery(C, "insert into " ++ Tab ++ " (erlsha,erlkey,erlval,change_time) values ($1,$2,$3,CURRENT_TIMESTAMP)", [PKey,TKey,Val]),
