@@ -946,7 +946,7 @@ table_size(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
 	{ok, _, [{X}]} = pgsql:squery(C, ["select pg_total_relation_size('", Tab, "')"]),
-	list_to_integer(binary_to_list(X)) * 4	% word definition of mnesia?
+	list_to_integer(binary_to_list(X)) div 4 % word definition of mnesia?
     catch
 	error:_ ->
 	    1
