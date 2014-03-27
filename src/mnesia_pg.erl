@@ -293,8 +293,10 @@ sync_close_table(_Alias, _Tab) ->
     ok.
 
 info(Alias, Tab, size) ->
-    count_table(Alias, Tab);			% not fast...
-info(_Alias, _Tab, _Item) ->
+    table_count(Alias, Tab);			% not fast...
+info(Alias, Tab, memory) ->
+    table_size(Alias, Tab);
+info(_Alias, _Tab, _) ->
     undefined.
 
 %% table synch calls, not used in KRED
@@ -384,12 +386,13 @@ lookup(Alias, Tab0, Key) ->
     {C, Tab} = get_ref(Alias, Tab0),
     PKey = encode_primary_key(Key),
     try
-	{ok, N, _, Res} = pgsql:equery(C, ["select * from ", Tab, " where erlsha=$1"], [PKey]),
+	{ok, _, Rs} = pgsql:equery(C, ["select * from ", Tab, " where erlsha=$1"], [PKey]),
+	N = length(Rs),
 	case (N) of
 	    0 ->
 		[];
 	    1 ->
-		[Row] = Res,			% Row = (pkey, tkey, val)
+		[Row] = Rs,			% Row = (pkey, tkey, val)
 		[decode_val(lists:nth(3, Row))]
 	end
     after
@@ -904,7 +907,8 @@ create_table(Alias, Tab0, _Props) ->
 					" UPDATE ", Tab, " SET erlkey=ekey, erlval=eval, change_time=current_timestamp WHERE erlsha = pkey;\n",
 					"END;\n", "$$\n", "LANGUAGE plpgsql;"]),
 	{ok, [], []} = pgsql:squery(C, ["create index ", Tab, "_term_idx on " ++ Tab ++ " (erlkey)"]),
-	{ok, [], []} = pgsql:squery(C, ["create unique index ", Tab, "_sha_idx on ", Tab, " (erlsha)"])
+	{ok, [], []} = pgsql:squery(C, ["create unique index ", Tab, "_sha_idx on ", Tab, " (erlsha)"]),
+	ok
     after 
 	mnesia_pg_conns:free(C)
     end.
@@ -926,11 +930,26 @@ load_table(_Alias, _Tab, _LoadReason, _Opts) ->
 close_table(_Alias, _Tab) ->
     ok.
 
-count_table(Alias, Tab0) ->
+table_count(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
 	{ok, _, [{X}]} = pgsql:squery(C, ["select count(*) from ", Tab]),
 	list_to_integer(binary_to_list(X))
+    catch
+	error:_ ->
+	    0
+    after
+	mnesia_pg_conns:free(C)
+    end.
+
+table_size(Alias, Tab0) ->
+    {C, Tab} = get_ref(Alias, Tab0),
+    try
+	{ok, _, [{X}]} = pgsql:squery(C, ["select pg_total_relation_size('", Tab, "')"]),
+	list_to_integer(binary_to_list(X)) * 4	% word definition of mnesia?
+    catch
+	error:_ ->
+	    1
     after
 	mnesia_pg_conns:free(C)
     end.
