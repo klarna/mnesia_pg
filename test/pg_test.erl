@@ -11,7 +11,6 @@ t0() ->
 t1() ->
     Fun = fun() ->
 		  mnesia:write(pg0, {x, allan, 123}, write),
-		  io:fwrite("well?~n"),
 		  mnesia:read(pg0, allan)
 	  end,
     mnesia:transaction(Fun).
