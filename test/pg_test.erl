@@ -1,6 +1,14 @@
 -module(pg_test).
 
--export([t0/0, t1/0]).
+-export([t0/0, t1/0, dbg/0]).
+
+dbg() ->
+    dbg:start(),
+    dbg:tracer(),
+    dbg:tpl(mnesia, '_', []),
+    %dbg:tpl(mnesia_locker, '_', []),
+    dbg:tpl(mnesia_lib, '_', []),
+    dbg:p(all,c).
 
 t0() ->
     setup_mnesia(),
