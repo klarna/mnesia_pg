@@ -1,6 +1,6 @@
 -module(pg_test).
 
--export([t0/0, t1/0, dbg/0]).
+-export([t0/0, t1/0, t2/0, dbg/0]).
 
 dbg() ->
     dbg:start(),
@@ -22,6 +22,9 @@ t1() ->
 		  mnesia:read(pg0, allan)
 	  end,
     mnesia:transaction(Fun).
+
+t2() ->
+    mnesia:dirty_read(pg0, allan).
 
 setup_mnesia() ->
     stopped = mnesia:stop(),
