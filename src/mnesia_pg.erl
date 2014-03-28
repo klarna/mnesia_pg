@@ -457,7 +457,7 @@ prev(Alias, Tab0, Key) ->
 first(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, _, Res} = pgsql:squery(C, ["select erlkey from ", Tab, " order by erlkey limit 1"]),
+	{ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, " order by erlkey limit 1"], []),
 	case (Res) of
 	    [] ->
 		'$end_of_table';
@@ -471,7 +471,7 @@ first(Alias, Tab0) ->
 last(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, _, Res} = pgsql:squery(C, ["select erlkey from ", Tab, " order by erlkey desc limit 1"]),
+	{ok, _, Res} = pgsql:equery(C, ["select erlkey from ", Tab, " order by erlkey desc limit 1"], []),
 	case (Res) of
 	    [] ->
 		'$end_of_table';
@@ -560,16 +560,24 @@ update_counter(Alias, Tab0, Key, Val) when is_integer(Val) ->
 
 with_iterator({C, Tab}, F) ->
     Curs = open_cursor(C, Tab),
-    try F(Curs)
-    after
-	close_cursor(Curs)
+    try
+	F(Curs),
+	commit_cursor(Curs)
+    catch
+	error:Reason ->
+	    io:fwrite("Cursor ~p failed (~p): ~p~n", [Curs, Reason, erlang:get_stacktrace()]),
+	    rollback_cursor(Curs)
     end.
 
 with_positioned_iterator({C, Tab}, Pat, F) ->
     Curs = open_cursor(C, Tab, Pat),
-    try F(Curs)
-    after
-	close_cursor(Curs)
+    try
+	F(Curs),
+	commit_cursor(Curs)
+    catch
+	error:Reason ->
+	    io:fwrite("Cursor ~p failed (~p): ~p~n", [Curs, Reason, erlang:get_stacktrace()]),
+	    rollback_cursor(Curs)
     end.
 
 %% record and key validation
@@ -815,27 +823,32 @@ is_wild(_) ->
 %% Each table has 4 columns: sha encoded key encoded value change time
 %% erlsha and erlkey are indexed
 open_cursor(C, Tab) ->
-    CursorName = "cursor_" ++ Tab ++ mnesia_pg_conns:ref(),
+    CursorName = "cursor_" ++ Tab ++ integer_to_list(mnesia_pg_conns:ref()),
     {ok, [], []} = pgsql:squery(C, "begin"),
-    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select * from ", Tab, " order by erlkey asc"]),
+    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select erlkey,erlval from ", Tab, " order by erlkey asc"]),
     {C, CursorName}.
 
 open_cursor(C, Tab, Pat) ->
     CursorName = "cursor_" ++ Tab ++ mnesia_pg_conns:ref(),
     {ok, [], []} = pgsql:squery(C, "begin"),
-    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select * from ", Tab, " where erlkey like '", Pat, "%' order by erlkey asc"]),
+    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select erlkey,erlval from ", Tab, " where erlkey like '", Pat, "%' order by erlkey asc"]),
     {C, CursorName}.
 
-close_cursor({C, CursorName}) ->
-    pgsql:squery(C, ["close ", CursorName]).
+commit_cursor({C, CursorName}) ->
+    pgsql:squery(C, ["close ", CursorName]),
+    pgsql:squery(C, "commit").
+
+rollback_cursor({C, CursorName}) ->
+    pgsql:squery(C, ["close ", CursorName]),
+    pgsql:squery(C, "rollback").
 
 fetch_next({C, CursorName}) ->
-    Res = pgsql:squery(C, ["fetch next from ", CursorName]),
+    Res = pgsql:equery(C, ["fetch next from ", CursorName], []),
     case (Res) of
 	{ok, 0} ->
 	    void;
-	{ok, 1, _, R} ->
-	    {ok, element(2, R), element(3, R)}
+	{ok, 1, _, [R]} ->
+	    {ok, element(1, R), element(2, R)}
     end.
 
 %pgsql:equery(C, "insert into " ++ Tab ++ " (erlsha,erlkey,erlval,change_time) values ($1,$2,$3,CURRENT_TIMESTAMP)", [PKey,TKey,Val]),
@@ -933,8 +946,8 @@ close_table(_Alias, _Tab) ->
 table_count(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, _, [{X}]} = pgsql:squery(C, ["select count(*) from ", Tab]),
-	list_to_integer(binary_to_list(X))
+	{ok, _, [{X}]} = pgsql:equery(C, ["select count(*) from ", Tab], []),
+	X
     catch
 	error:_ ->
 	    0
@@ -945,8 +958,8 @@ table_count(Alias, Tab0) ->
 table_size(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, _, [{X}]} = pgsql:squery(C, ["select pg_total_relation_size('", Tab, "')"]),
-	list_to_integer(binary_to_list(X)) div 4 % word definition of mnesia?
+	{ok, _, [{X}]} = pgsql:equery(C, ["select pg_total_relation_size('", Tab, "')"], []),
+	X div 4 % word definition of mnesia?
     catch
 	error:_ ->
 	    1
