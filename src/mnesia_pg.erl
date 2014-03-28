@@ -129,11 +129,7 @@
 	      tab,
 	      ref,
 	      keypat,
-	      ms,                               % TODO: not used
-	      compiled_ms,
-	      limit,
-	      key_only = false,                 % TODO: not used
-	      direction = forward}).            % TODO: not used
+	      limit}).
 
 %% ----------------------------------------------------------------------------
 %% CONVENIENCE API
@@ -561,23 +557,27 @@ update_counter(Alias, Tab0, Key, Val) when is_integer(Val) ->
 with_iterator({C, Tab}, F) ->
     Curs = open_cursor(C, Tab),
     try
-	F(Curs),
-	commit_cursor(Curs)
+	R = F(Curs),
+	commit_cursor(Curs),
+	R
     catch
 	error:Reason ->
 	    io:fwrite("Cursor ~p failed (~p): ~p~n", [Curs, Reason, erlang:get_stacktrace()]),
-	    rollback_cursor(Curs)
+	    rollback_cursor(Curs),
+	    '$end_of_table'
     end.
 
 with_positioned_iterator({C, Tab}, Pat, F) ->
     Curs = open_cursor(C, Tab, Pat),
     try
-	F(Curs),
-	commit_cursor(Curs)
+	R = F(Curs),
+	commit_cursor(Curs),
+	R
     catch
 	error:Reason ->
 	    io:fwrite("Cursor ~p failed (~p): ~p~n", [Curs, Reason, erlang:get_stacktrace()]),
-	    rollback_cursor(Curs)
+	    rollback_cursor(Curs),
+	    '$end_of_table'
     end.
 
 %% record and key validation
@@ -611,20 +611,19 @@ do_select(Ref, Tab, MS, AccKeys, Limit) when is_boolean(AccKeys) ->
     Keypat = keypat(MS, keypos(Tab)),
     Sel = #sel{ref = Ref,
 	       keypat = Keypat,
-	       ms = MS,
-	       compiled_ms = ets:match_spec_compile(MS),
 	       limit = Limit},
     {Pfx, _} = Keypat,
+    CompMS = ets:match_spec_compile(MS),
     case (Pfx) of
 	<<>> ->
 	    with_iterator(Ref,
 			  fun(Curs) ->
-				  select_traverse(fetch_next(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, [])
+				  select_traverse(fetch_next(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
 			  end);
 	_ ->
 	    with_positioned_iterator(Ref, Pfx,
 				     fun(Curs) ->
-					     select_traverse(fetch_next(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, [])
+					     select_traverse(fetch_next(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
 				     end)
     end.
 
