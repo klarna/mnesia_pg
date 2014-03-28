@@ -26,6 +26,7 @@
 %%
 
 -export([register/0,
+	 dbg/1,
          default_alias/0]).
 
 %%
@@ -540,7 +541,7 @@ update_counter(Alias, Tab0, Key, Val) when is_integer(Val) ->
 		case decode_val(element(3, Row)) of
 		    {_, _, Old} when is_integer(Old) ->
 			Return = Old+Val,
-			pgsql:equery(C, ["update ", Tab, " set erlval=$2, change_time=current_timestamp where erlsha=$1"], [PKey, encode_val(Return)]),
+			{ok, _} = pgsql:equery(C, ["update ", Tab, " set erlval=$2, change_time=current_timestamp where erlsha=$1"], [PKey, encode_val(Return)]),
 			pgsql:squery(C, "commit");
 		    _ ->
 			pgsql:squery(C, "rollback"),
@@ -854,7 +855,8 @@ fetch_next({C, CursorName}) ->
 upsert_into(Alias, Tab0, PKey, TKey, Val) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	pgsql:equery(C, ["select upsert_", Tab, "($1,$2,$3)"], [PKey,TKey,Val])
+	{ok, _, _} = pgsql:equery(C, ["select upsert_", Tab, "($1,$2,$3)"], [PKey,TKey,Val]),
+	ok
     after
 	mnesia_pg_conns:free(C)
     end.
@@ -909,11 +911,12 @@ delete_from_pattern(Alias, Tab0, Pat) ->
 create_table(Alias, Tab0, _Props) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	pgsql:squery(C, ["drop index ", Tab, "_term_idx"]),
-	pgsql:squery(C, ["drop index ", Tab, "_sha_idx"]),
-	pgsql:squery(C, ["drop table ", Tab]),
+	pgsql:squery(C, ["drop index if exists ", Tab, "_term_idx"]),
+	pgsql:squery(C, ["drop index if exists ", Tab, "_sha_idx"]),
+	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea)"]),
+	pgsql:squery(C, ["drop table if exists ", Tab]),
 	{ok, [], []} = pgsql:squery(C, ["create table ", Tab, "( erlsha numeric, erlkey character varying(2048), erlval bytea, change_time timestamp )"]),
-	{ok, [], []} = pgsql:squery(C, ["create or replace function upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea) RETURNS void AS\n",
+	{ok, [], []} = pgsql:squery(C, ["create function upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea) RETURNS void AS\n",
 					"$$\n", "BEGIN\n", " INSERT INTO ", Tab, " VALUES (pkey, ekey, eval, current_timestamp);\n",
 					"EXCEPTION WHEN unique_violation THEN\n",
 					" UPDATE ", Tab, " SET erlkey=ekey, erlval=eval, change_time=current_timestamp WHERE erlsha = pkey;\n",
@@ -928,10 +931,10 @@ create_table(Alias, Tab0, _Props) ->
 delete_table(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	pgsql:squery(C, ["drop index ", Tab, "_term_idx"]),
-	pgsql:squery(C, ["drop index ", Tab, "_sha_idx"]),
-	pgsql:squery(C, ["drop function upsert_", Tab]),
-	pgsql:squery(C, ["drop table ", Tab])
+	pgsql:squery(C, ["drop index if exists ", Tab, "_term_idx"]),
+	pgsql:squery(C, ["drop index if exists ", Tab, "_sha_idx"]),
+	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea)"]),
+	pgsql:squery(C, ["drop table if exists ", Tab])
     after
 	mnesia_pg_conns:free(C)
     end.
@@ -989,5 +992,14 @@ retainername(Name) when is_list(Name) ->
     end;
 retainername(Name) ->
     lists:flatten(io_lib:write(Name)).
+
+dbg(on) ->
+    dbg:start(),
+    dbg:tracer(),
+    dbg:tpl(mnesia_pg, '_', []),
+    dbg:tpl(pgsql, '_', []),
+    dbg:p(all,c);
+dbg(off) ->
+    dbg:stop_clear().
 
 %%%impl_doc_include

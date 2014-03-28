@@ -2,7 +2,7 @@
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
--export([t0/0, t1/0, t2/0, t3/0, t4/0, dbg/1]).
+-export([t0/0, t1/0, t2/0, t3/0, t4/0, t5/0, dbg/1]).
 
 -record(x, {name, value}).
 
@@ -43,6 +43,12 @@ t3() ->
 t4() ->
     F = fun() -> mnesia:match_object(pg0, {x,'_','_'}, read) end,
     mnesia:transaction(F).
+
+t5() ->
+    Fun = fun() ->
+		  mnesia:delete(pg0, allan, write)
+	  end,
+    mnesia:transaction(Fun).
 
 setup_mnesia() ->
     stopped = mnesia:stop(),
