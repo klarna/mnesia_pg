@@ -2,7 +2,7 @@
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
--export([t0/0, t1/0, t2/0, t3/0, t4/0, t5/0, dbg/1]).
+-export([t0/0, t1/0, t2/0, t3/0, t3b/0, t4/0, t5/0, dbg/1]).
 
 -record(x, {name, value}).
 
@@ -37,6 +37,11 @@ t2() ->
 
 t3() ->
     MS = ets:fun2ms(fun(X) -> X end),		%select *
+    F = fun() -> mnesia:select(pg0,MS) end,
+    mnesia:transaction(F).
+
+t3b() ->
+    MS = ets:fun2ms(fun(#x{name=X}) -> X end),
     F = fun() -> mnesia:select(pg0,MS) end,
     mnesia:transaction(F).
 
