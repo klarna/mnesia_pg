@@ -771,7 +771,8 @@ decode_key(CodedKey) ->
     mnesia_sext:decode_sb32(CodedKey).
 
 encode_val(Val) ->
-    term_to_binary(Val, [compression]).
+    term_to_binary(Val).
+    %term_to_binary(Val,[{compressed,5},{minor_version, 1}]).
 
 decode_val(CodedVal) ->
     binary_to_term(CodedVal).
