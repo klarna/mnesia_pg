@@ -6,10 +6,13 @@
 %% %CopyrightEnd%
 %%
 
+%% TODO:
+%% io wait is high
+%% index is scanned?
+
 %%%header_doc_include
 
 -module(mnesia_pg).
-
 
 %% ----------------------------------------------------------------------------
 %% BEHAVIOURS
@@ -365,7 +368,7 @@ chunk_fun() ->
 %% ===========================================================
 
 delete(Alias, Tab, Key) ->
-    delete_from(Alias, Tab, encode_primary_key(Key)).
+    delete_from(Alias, Tab, encode_key(Key)).
 
 %% Not relevant for an ordered_set
 fixtable(_Alias, _Tab, _Bool) ->
@@ -374,23 +377,22 @@ fixtable(_Alias, _Tab, _Bool) ->
 insert(Alias, Tab, Obj) ->
     Pos = keypos(Tab),
     Key = element(Pos, Obj),
-    PKey = encode_primary_key(Key),	% lookup via index
-    TKey = encode_key(Key),		% sorted via index
+    PKey = encode_key(Key),
     Val = encode_val(Obj),
-    upsert_into(Alias, Tab, PKey, TKey, Val).
+    upsert_into(Alias, Tab, PKey, Val).
 
 lookup(Alias, Tab0, Key) ->
     {C, Tab} = get_ref(Alias, Tab0),
-    PKey = encode_primary_key(Key),
+    PKey = encode_key(Key),
     try
-	{ok, _, Rs} = pgsql:equery(C, ["select * from ", Tab, " where erlsha=$1"], [PKey]),
+	{ok, _, Rs} = pgsql:equery(C, ["select erlval from ", Tab, " where erlkey=$1"], [PKey]),
 	N = length(Rs),
 	case (N) of
 	    0 ->
 		[];
 	    1 ->
-		[Row] = Rs,			% Row = (pkey, tkey, val)
-		[decode_val(element(3, Row))]
+		[Row] = Rs,
+		[decode_val(element(1, Row))]
 	end
     after
 	mnesia_pg_conns:free(C)
@@ -528,20 +530,20 @@ slot_iter_set(Res, _, _, _) when element(1, Res) =/= ok ->
 %% need select for update since the value in erlval is an int encoded as a binary
 update_counter(Alias, Tab0, Key, Val) when is_integer(Val) ->
     {C, Tab} = get_ref(Alias, Tab0),
-    PKey = encode_primary_key(Key),
+    PKey = encode_key(Key),
     try
 	{ok, [], []} = pgsql:squery(C, "begin"),
-	{ok, N, _, Res} = pgsql:equery(C, ["select from ", Tab, " where erlsha=$1 for update"], [PKey]),
+	{ok, N, _, Res} = pgsql:equery(C, ["select erlval from ", Tab, " where erlkey=$1 for update"], [PKey]),
 	case (N) of
 	    0 ->
 		pgsql:squery(C, "rollback"),
 		Return = badarg;
 	    1 ->
 		[Row] = Res,
-		case decode_val(element(3, Row)) of
+		case decode_val(element(1, Row)) of
 		    {_, _, Old} when is_integer(Old) ->
 			Return = Old+Val,
-			{ok, _} = pgsql:equery(C, ["update ", Tab, " set erlval=$2, change_time=current_timestamp where erlsha=$1"], [PKey, encode_val(Return)]),
+			{ok, _} = pgsql:equery(C, ["update ", Tab, " set erlval=$2, change_time=current_timestamp where erlkey=$1"], [PKey, encode_val(Return)]),
 			pgsql:squery(C, "commit");
 		    _ ->
 			pgsql:squery(C, "rollback"),
@@ -769,7 +771,8 @@ decode_key(CodedKey) ->
     mnesia_sext:decode_sb32(CodedKey).
 
 encode_val(Val) ->
-    term_to_binary(Val,[{compressed,5},{minor_version, 1}]).
+    term_to_binary(Val).
+    %term_to_binary(Val,[{compressed,5},{minor_version, 1}]).
 
 decode_val(CodedVal) ->
     binary_to_term(CodedVal).
@@ -820,8 +823,7 @@ is_wild(_) ->
 
 
 %% PG interface
-%% Each table has 4 columns: sha encoded key encoded value change time
-%% erlsha and erlkey are indexed
+%% Each table has 3 columns: encoded key encoded value change time
 open_cursor(C, Tab) ->
     CursorName = "cursor_" ++ Tab ++ integer_to_list(mnesia_pg_conns:ref()),
     {ok, [], []} = pgsql:squery(C, "begin"),
@@ -829,7 +831,7 @@ open_cursor(C, Tab) ->
     {C, CursorName}.
 
 open_cursor(C, Tab, Pat) ->
-    CursorName = "cursor_" ++ Tab ++ mnesia_pg_conns:ref(),
+    CursorName = "cursor_" ++ Tab ++ integer_to_list(mnesia_pg_conns:ref()),
     {ok, [], []} = pgsql:squery(C, "begin"),
     {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select erlkey,erlval from ", Tab, " where erlkey like '", Pat, "%' order by erlkey asc"]),
     {C, CursorName}.
@@ -851,11 +853,11 @@ fetch_next({C, CursorName}) ->
 	    {ok, element(1, R), element(2, R)}
     end.
 
-%pgsql:equery(C, "insert into " ++ Tab ++ " (erlsha,erlkey,erlval,change_time) values ($1,$2,$3,CURRENT_TIMESTAMP)", [PKey,TKey,Val]),
-upsert_into(Alias, Tab0, PKey, TKey, Val) ->
+%pgsql:equery(C, "insert into " ++ Tab ++ " (erlkey,erlval,change_time) values ($1,$2,CURRENT_TIMESTAMP)", [PKey,Val]),
+upsert_into(Alias, Tab0, PKey, Val) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, _, _} = pgsql:equery(C, ["select upsert_", Tab, "($1,$2,$3)"], [PKey,TKey,Val]),
+	{ok, _, _} = pgsql:equery(C, ["select upsert_", Tab, "($1,$2)"], [PKey,Val]),
 	ok
     after
 	mnesia_pg_conns:free(C)
@@ -864,7 +866,7 @@ upsert_into(Alias, Tab0, PKey, TKey, Val) ->
 delete_from(Alias, Tab0, PKey) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, N} = pgsql:equery(C, ["delete from ", Tab, " where erlsha=$1"], [PKey]),
+	{ok, N} = pgsql:equery(C, ["delete from ", Tab, " where erlkey=$1"], [PKey]),
 	N
     after
 	mnesia_pg_conns:free(C)
@@ -874,7 +876,7 @@ delete_list(Alias, Tab0, PKeyList) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
 	N = lists:foldl(fun(PKey, Sum) ->
-				{ok, N} = pgsql:equery(C, ["delete from ", Tab, " where erlsha=$1"], [PKey]),
+				{ok, N} = pgsql:equery(C, ["delete from ", Tab, " where erlkey=$1"], [PKey]),
 				Sum + N
 			end,
 			0,
@@ -912,17 +914,15 @@ create_table(Alias, Tab0, _Props) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
 	pgsql:squery(C, ["drop index if exists ", Tab, "_term_idx"]),
-	pgsql:squery(C, ["drop index if exists ", Tab, "_sha_idx"]),
-	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea)"]),
+	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(ekey character varying, eval bytea)"]),
 	pgsql:squery(C, ["drop table if exists ", Tab]),
-	{ok, [], []} = pgsql:squery(C, ["create table ", Tab, "( erlsha numeric, erlkey character varying(2048), erlval bytea, change_time timestamp )"]),
-	{ok, [], []} = pgsql:squery(C, ["create function upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea) RETURNS void AS\n",
-					"$$\n", "BEGIN\n", " INSERT INTO ", Tab, " VALUES (pkey, ekey, eval, current_timestamp);\n",
+	{ok, [], []} = pgsql:squery(C, ["create table ", Tab, "( erlkey character varying(2048), erlval bytea, change_time timestamp )"]),
+	{ok, [], []} = pgsql:squery(C, ["create function upsert_", Tab, "(ekey character varying, eval bytea) RETURNS void AS\n",
+					"$$\n", "BEGIN\n", " INSERT INTO ", Tab, " VALUES (ekey, eval, current_timestamp);\n",
 					"EXCEPTION WHEN unique_violation THEN\n",
-					" UPDATE ", Tab, " SET erlkey=ekey, erlval=eval, change_time=current_timestamp WHERE erlsha = pkey;\n",
+					" UPDATE ", Tab, " SET erlval=eval, change_time=current_timestamp WHERE erlkey = ekey;\n",
 					"END;\n", "$$\n", "LANGUAGE plpgsql;"]),
-	{ok, [], []} = pgsql:squery(C, ["create index ", Tab, "_term_idx on " ++ Tab ++ " (erlkey)"]),
-	{ok, [], []} = pgsql:squery(C, ["create unique index ", Tab, "_sha_idx on ", Tab, " (erlsha)"]),
+	{ok, [], []} = pgsql:squery(C, ["create unique index ", Tab, "_term_idx on " ++ Tab ++ " (erlkey)"]),
 	ok
     after 
 	mnesia_pg_conns:free(C)
@@ -932,8 +932,7 @@ delete_table(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
 	pgsql:squery(C, ["drop index if exists ", Tab, "_term_idx"]),
-	pgsql:squery(C, ["drop index if exists ", Tab, "_sha_idx"]),
-	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(pkey numeric, ekey character varying, eval bytea)"]),
+	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(ekey character varying, eval bytea)"]),
 	pgsql:squery(C, ["drop table if exists ", Tab])
     after
 	mnesia_pg_conns:free(C)
@@ -996,6 +995,7 @@ retainername(Name) ->
 dbg(on) ->
     dbg:start(),
     dbg:tracer(),
+    dbg:tpl(mnesia, '_', []),
     dbg:tpl(mnesia_pg, '_', []),
     dbg:tpl(pgsql, '_', []),
     dbg:p(all,c);
