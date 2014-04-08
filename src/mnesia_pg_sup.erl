@@ -22,4 +22,5 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-    {ok, { {one_for_one, 5, 10}, [?CHILD(mnesia_pg_conns, worker)]} }.
+    {ok, { {one_for_one, 5, 10}, [?CHILD(mnesia_pgsql_mon, worker),
+				  ?CHILD(mnesia_pg_conns, worker)]} }.
