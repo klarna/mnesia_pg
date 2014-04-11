@@ -1,14 +1,38 @@
 -module(mnesia_pg_util).
 
--export([create/0,
+-export([init_env/0,
+	 create/0,
 	 pg_dir/1,
 	 pg_bin/1,
+	 get_env/2,
 	 stop/0, stop/2,
 	 get_saved_port/0]).
 -export([test/0]).
 -export([ttest/0]).
 
 -include("mnesia_pg_int.hrl").
+
+init_env() ->
+    C0 = #conf{},
+    application:load(mnesia_pg),
+    User = get_env(pg_user, C0#conf.user),
+    Pwd = get_env(pg_pwd, C0#conf.password),
+    Db = get_env(pg_db, C0#conf.db),
+    Pool = get_env(pool_size, C0#conf.pool_size),
+    PgBin = get_env(pg_bin, "/usr/local/pgsql/bin"),
+    Dir = mnesia_monitor:get_env(dir),
+    PgDir = get_env(pg_dir, filename:join(Dir, "pgdata")),
+    C = #conf{bin  = PgBin,
+	      dir  = PgDir,
+	      db   = Db,
+	      user = User,
+	      password = Pwd,
+	      pool_size = Pool},
+    case filelib:is_dir(PgDir) of
+	false -> C#conf{status = not_installed,
+			port = get_port()};
+	true  -> pg_status(C)
+    end.
 
 pg_dir(#conf{dir = Dir}) ->
     Dir.
@@ -32,6 +56,7 @@ test() ->
 
 create() ->
     C = init_env(),
+    io:fwrite("init_env() -> ~p~n", [C]),
     ensure_running(C).
 
 ensure_running(#conf{status = not_installed} = C) ->
@@ -41,28 +66,52 @@ ensure_running(#conf{status = not_running} = C) ->
 ensure_running(#conf{status = running} = C) ->
     C.
 
-start_monitor(#conf{bin = PgBin, dir = PgDir} = C) ->
-    mnesia_pgsql_mon:start(PgBin, PgDir),
-    C.
-
 init_db(#conf{status = not_installed,
 	      bin = PgBin, dir = PgDir} = C) ->
     cmd([filename:join(PgBin,"initdb"), " -D ", PgDir]),
     C#conf{status = not_running}.
 
-start_db(#conf{status = not_running,
-	       bin = PgBin, port = Port, dir = PgDir, user = User} = C) ->
+start_db(#conf{status = not_running, dir = PgDir,
+	       port = Port, user = User, db = Db} = C) ->
     PortStr = integer_to_list(Port),
     PgLog = filename:join(mnesia_monitor:get_env(dir), "pglog"),
     Opts = "-i -h localhost -p " ++ PortStr,
-    cmd([filename:join(PgBin,"pg_ctl"), " -D ", PgDir, " -l ", PgLog,
-	 " -w -t 10 -o \"", Opts, "\" start"]),
-    cmd([filename:join(PgBin,"createuser"), " -h localhost -p ", PortStr,
-	 " ", User]),
-    cmd([filename:join(PgBin,"createdb"), " -h localhost -p ", PortStr,
-	 " --owner=", User, " erldb"]),
+    cmd([c("pg_ctl", C), "start -D ", PgDir, " -l ", PgLog,
+	 " -w -t 10 -o \"", Opts, "\""]),
+    CreateUser =
+	cmd([c("createuser",C), " -h localhost -p ", PortStr,
+	     " ", User]),
+    cmd([c("createdb",C), " -h localhost -p ", PortStr,
+	 " --owner=", User, " ", Db]),
+    modify_user(CreateUser, C),
     save_port(Port),
-    C#conf{status = running}.
+    C#conf{status = running, was_running = false}.
+
+modify_user(_, #conf{password = ""}) ->
+    ok;
+modify_user(Res, #conf{user = User, password = Pwd} = C) ->
+    case Res of
+	"createuser: " ++ _ = Err ->
+	    case re:run(Err, "already exists", []) of
+		{match, _} -> ok;
+		_ -> error({unknown_error, Err})
+	    end;
+	_ -> ok
+    end,
+    psql(["alter role ", User, " with password '", Pwd, "';"], C).
+
+
+%% psql(SQL) ->
+%%     Conf = mnesia_pgsql_mon:get_conf(),
+%%     psql(SQL, Conf).
+
+psql(SQL, #conf{bin = PgBin, db = Db, host = Host, port = Port}) ->
+    PortStr = integer_to_list(Port),
+    cmd([filename:join(PgBin, "psql"), " -h ", Host, " -p ", PortStr,
+	 " -d ", Db, " -c \"", SQL, "\""]).
+
+c(Cmd, #conf{bin = Bin}) ->
+    filename:join(Bin, Cmd).
 
 stop() ->
     Dir = mnesia_monitor:get_env(dir),
@@ -71,7 +120,7 @@ stop() ->
     stop(PgBin, PgDir).
 
 stop(PgBin, PgDir) ->
-    cmd([filename:join(PgBin,"pg_ctl"), " -D ", PgDir, " stop"]).
+    cmd([filename:join(PgBin,"pg_ctl"), "stop -D ", PgDir]).
 
 cmd(Cmd0) ->
     Cmd = lists:flatten(Cmd0),
@@ -83,31 +132,13 @@ cmd(Cmd0) ->
 	"/bin/sh:" ++ _ ->
 	    error(script_error);
 	_ ->
-	    ok
-    end.
-
-init_env() ->
-    C0 = #conf{},
-    application:load(mnesia_pg),
-    User = get_env(pg_user, C0#conf.user),
-    Db = get_env(pg_db, C0#conf.db),
-    PgBin = get_env(pg_bin, "/usr/local/pgsql/bin"),
-    Dir = mnesia_monitor:get_env(dir),
-    PgDir = filename:join(Dir, "pgdata"),
-    C = #conf{bin  = PgBin,
-	      dir  = PgDir,
-	      db   = Db,
-	      user = User},
-    case filelib:is_dir(PgDir) of
-	false -> C#conf{status = not_installed,
-			port = get_port()};
-	true  -> pg_status(C)
+	    Res
     end.
 
 pg_status(#conf{bin = Bin, dir = Dir} = C) ->
-    Ctl = filename:join(Bin, "pg_ctl"),
-    Cmd = [Ctl, " -D ", Dir, " status"],
-    if_not_running(parse_status(os:cmd(Cmd), C)).
+    Ctl = filename:join(Bin, "pg_ctl status"),
+    Cmd = [Ctl, " -D ", Dir],
+    if_not_running(parse_status(cmd(Cmd), C)).
 
 parse_status("pg_ctl: no server" ++ _, C) ->
     C#conf{status = not_running};
@@ -123,7 +154,8 @@ parse_status("pg_ctl: server is running" ++ Rest, C) ->
 	    P = match1(re:run(CmdS, "-p[\\h]+([^\\h]+)", [{capture,[1],list}])),
 	    C#conf{status = running,
 		   host = H,
-		   port = list_to_integer(P)};
+		   port = list_to_integer(P),
+		   was_running = true};
 	nomatch ->
 	    error(inet_not_enabled)
     end.

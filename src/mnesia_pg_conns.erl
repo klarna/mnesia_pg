@@ -3,20 +3,29 @@
 -behaviour(gen_server).
 -export([start_link/0]).
 -export([alloc/1, free/1, ref/0, state/0]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, code_change/3, terminate/2]).
+-export([init/1, handle_call/3, handle_cast/2,
+	 handle_info/2, code_change/3, terminate/2]).
+
+-include("mnesia_pg_int.hrl").
 
 start_link() ->
-    {ok, N} = application:get_env(mnesia_pg, pool_size),
-    {ok, User} = application:get_env(mnesia_pg, pg_user),
-    {ok, Pwd} = application:get_env(mnesia_pg, pg_pwd),
-    gen_server:start_link({local, conn_pool}, ?MODULE, [N, User, Pwd], []).
+    Conf = mnesia_pgsql_mon:get_conf(),
+    gen_server:start_link({local, conn_pool}, ?MODULE, Conf, []).
 
-open_connections(N, User, Pwd) ->
+open_connections(#conf{pool_size = N,
+		       host = Host,
+		       port = Port,
+		       user = User,
+		       password = Pwd,
+		       db = Db}) ->
     L = lists:seq(1, N),			% N connections
-    ConnL = lists:map(fun(_) ->
-			      {ok, C} = pgsql:connect("localhost", User, Pwd, [{database,"erldb"}]),
-			      C
-		      end, L),
+    ConnL = lists:map(
+	      fun(_) ->
+		      {ok, C} = pgsql:connect(Host, User, Pwd,
+					      [{database, Db},
+					       {port, Port}]),
+		      C
+	      end, L),
     ConnL.
 
 alloc(Tab) ->
@@ -43,17 +52,22 @@ ref() ->
 state() ->
     gen_server:call(conn_pool, get_state).
 
-init([N, User, Pwd]) ->
-    ConnL = open_connections(N, User, Pwd),
+init(Conf) ->
+    ConnL = open_connections(Conf),
+    io:fwrite("Connection opened~n", []),
+    check_schema_cookie(ConnL),
     process_flag(trap_exit, true),
     {A1,A2,A3} = now(),
     random:seed(A1, A2, A3),
     {ok, {ConnL, []}}.
 
-terminate(_, ConnL) ->
-    lists:map(fun(C) ->
-		      pgsql:close(C)
-	      end, ConnL).
+terminate(_, {ConnL, _}) ->
+    lists:foreach(fun(C) ->
+			  try pgsql:close(C)
+			  catch
+			      _:_ -> ok
+			  end
+		  end, ConnL).
 
 handle_call(get_ref, _From, State) ->
     {reply, random:uniform(100000000), State};
@@ -76,3 +90,70 @@ handle_info(_, State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+%% Internal
+
+check_schema_cookie([H|_]) ->
+    sql_transaction(H, fun() -> do_check_schema_cookie(H) end).
+
+do_check_schema_cookie(H) ->
+    MyCookie = mnesia_lib:val({schema, cookie}),
+    SQL = "select erlval from schema where erlkey='cookie'",
+    Res = pgsql:equery(H, SQL, []),
+    io:fwrite("schema query: ~p~n", [Res]),
+    case Res of
+	{error,{error,error,<<"42P01">>,_,_}} ->
+	    %% schema doesn't exist
+	    io:fwrite("schema doesn't exist~n", []),
+	    CreateRes = sql_create_schema(H),
+	    io:fwrite("CreateRes = ~p~n", [CreateRes]),
+	    insert_cookie(H, MyCookie);
+	{ok, _, []} ->
+	    %% No cookie
+	    io:fwrite("No cookie~n", []),
+	    insert_cookie(H, MyCookie),
+	    ok;
+	{ok, [{column,<<"erlval">>,bytea,_,_,_}],[{Bin}]} = Res ->
+	    io:fwrite("Res = ~p~n", [Res]),
+	    try binary_to_term(Bin) of
+		MyCookie ->
+		    io:fwrite("Cookies match!~n", []),
+		    ok;
+		WrongCookie ->
+		    error({schema_cookie_mismatch,{WrongCookie,MyCookie}})
+	    catch
+		error:_ ->
+		    io:fwrite("cannot decode cookie~n", [])
+	    end
+    end.
+
+insert_cookie(C, Cookie) ->
+    InsertRes =
+	pgsql:equery(C, ("insert into schema (erlkey, erlval) values"
+			 " ('cookie', $1)"),
+		     [term_to_binary(Cookie)]),
+    io:fwrite("InsertRes = ~p~n", [InsertRes]),
+    ok.
+    
+
+
+sql_transaction(_C, F) ->
+    %% pgsql:squery(C, "begin"),
+    try  F()
+	 %% pgsql:squery(C, "commit")
+    catch
+	error:E ->
+	    %% pgsql:squery(C, "rollback"),
+	    error(E);
+	exit:R ->
+	    %% pgsql:squery(C, "rollback"),
+	    exit(R);
+	throw:T ->
+	    %% pgsql:squery(C, "rollback"),
+	    throw(T)
+    end.
+
+	    
+
+sql_create_schema(H) ->
+    pgsql:squery(H, ("create table schema"
+		     " (erlkey character varying(64), erlval bytea)")).

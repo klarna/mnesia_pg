@@ -2,6 +2,8 @@
 -module(mnesia_pgsql_mon).
 -behaviour(gen_server).
 
+-export([get_conf/0]).
+
 -export([connect/1]).
 
 -record(st, {master,
@@ -17,8 +19,7 @@
 -record(srv, {lsock,
               sock,
               port,
-              conf,
-              acceptor}).  % server state
+              conf}).  % server state
 
 %% gen_server API
 -export([start_link/0,
@@ -29,6 +30,9 @@
          terminate/2,
          code_change/3]).
 
+get_conf() ->
+    gen_server:call(?MODULE, get_conf).
+
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -36,13 +40,20 @@ init([]) ->
     {ok, LSock} = gen_tcp:listen(0, mon_port_opts()),
     {ok, MyPort} = inet:port(LSock),
     Me = self(),
-    APid = spawn_link(fun() -> do_accept(LSock, Me) end),
     Conf = mnesia_pg_util:create(),
-    spawn_link(fun() -> start(MyPort) end),
+    io:fwrite("init: Conf = ~p (was_running=~p)~n", [Conf,Conf#conf.was_running]),
+    case Conf#conf.was_running of
+        true ->
+            ok;
+        false ->
+            %% We started a postgres instance; monitor it!
+            spawn_link(fun() -> do_accept(LSock, Me) end),
+            spawn_link(fun() -> start(MyPort) end)
+    end,
+    spawn_link(fun monitor_mnesia/0),
     {ok, #srv{lsock = LSock,
               port = MyPort,
-              conf = Conf,
-              acceptor = APid}}.
+              conf = Conf}}.
 
 
 handle_cast(_, S) ->
@@ -60,13 +71,15 @@ handle_info(Msg, S) ->
     io:fwrite("Got unknown Msg = ~p~n", [Msg]),
     {noreply, S}.
 
+handle_call(get_conf, _, #srv{conf = Conf} = S) ->
+    {reply, Conf, S};
 handle_call(_, _, S) -> {reply, error, S}.
 terminate(_, _) -> ok.
 code_change(_, S, _) -> {ok, S}.
 
 do_accept(LSock, Parent) ->
     io:fwrite("do_accept(~p - ~p)~n", [LSock, inet:port(LSock)]),
-    case gen_tcp:accept(LSock, 10000) of
+    case gen_tcp:accept(LSock, 30000) of
         {ok, Sock} ->
             io:fwrite("pgsql monitor connected!~n", []),
             ok = gen_tcp:controlling_process(Sock, Parent),
@@ -74,6 +87,13 @@ do_accept(LSock, Parent) ->
             Parent ! {accepted, Sock};
         Error ->
             exit({accept_error, Error})
+    end.
+
+monitor_mnesia() ->
+    MRef = monitor(process, mnesia_sup),
+    receive
+        {'DOWN', MRef, _, _, _} ->
+            application:stop(mnesia_pg)
     end.
 
 start(MyPort) ->
@@ -121,7 +141,8 @@ loop(#st{sock = Sock, conf = Conf} = S) ->
     receive
         {tcp_closed, Sock} ->
             io:fwrite("sock (~p) closed~n", [Sock]),
-            stop_pgsql(Conf);
+            stop_pgsql(Conf),
+            init:stop();
         Other ->
             io:fwrite("Received ~p - ignoring~n", [Other]),
             loop(S)
