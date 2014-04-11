@@ -153,6 +153,10 @@ foreach_f(F, KS, N) ->
 
 fold(F, Acc, seq, N) ->
     lists:foldl(F, Acc, lists:seq(1, N));
+fold(F, Acc, random, N) ->
+    {M,S,U} = os:timestamp(),
+    Seed = seed(M,S,U),
+    fold_f(F, Acc, fun(N1) -> random_s(N1, Seed) end, N);
 fold(F, Acc, KS, N) when is_function(KS, 1) ->
     fold_f(F, Acc, KS, N).
 
@@ -162,3 +166,15 @@ fold_f(F, Acc, KS, N) ->
 	{Key, KS1} ->
 	    fold_f(F, F(Key, Acc), KS1, N)
     end.
+
+random_s(N, Seed) ->
+    {Key, NewSeed} = random:uniform_s(N, Seed),
+    {Key, fun(N1) -> random_s(N1, NewSeed) end}.
+
+%% Create seed without side-effects (or at least repairing the unavoidable one)
+seed(A,B,C) ->
+    OldSeed = get(random_seed),
+    NewSeed = random:seed(A,B,C),
+    put(random_seed, OldSeed),
+    NewSeed.
+		   

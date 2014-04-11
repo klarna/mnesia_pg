@@ -7,6 +7,7 @@
 	 get_env/2,
 	 stop/0, stop/2,
 	 get_saved_port/0]).
+-export([clear_psql_db/0]).
 -export([test/0]).
 -export([ttest/0]).
 
@@ -32,6 +33,21 @@ init_env() ->
 	false -> C#conf{status = not_installed,
 			port = get_port()};
 	true  -> pg_status(C)
+    end.
+
+clear_psql_db() ->
+    case mnesia_lib:is_running() of
+	no ->
+	    application:load(mnesia),
+	    case init_env() of
+		#conf{status = running, was_running = true} = C ->
+		    psql_drop_all_tables(C),
+		    ok;
+		_ ->
+		    {error, postgres_not_running}
+	    end;
+	_ ->
+	    {error, mnesia_is_running}
     end.
 
 pg_dir(#conf{dir = Dir}) ->
@@ -109,6 +125,21 @@ psql(SQL, #conf{bin = PgBin, db = Db, host = Host, port = Port}) ->
     PortStr = integer_to_list(Port),
     cmd([filename:join(PgBin, "psql"), " -h ", Host, " -p ", PortStr,
 	 " -d ", Db, " -c \"", SQL, "\""]).
+
+psql_drop_all_tables(C) ->
+    Tabs = psql_list_tables(C),
+    io:fwrite("list_tables -> ~p~n", [Tabs]),
+    [psql(["drop table if exists \"", T, "\" cascade"], C)
+     || T <- Tabs].
+
+psql_list_tables(#conf{bin = PgBin, db = Db, host = Host, port = Port}) ->
+    PortStr = integer_to_list(Port),
+    SQL = ("select table_name from information_schema.tables"
+	   " where table_schema='public'"),
+    R = cmd([filename:join(PgBin, "psql"), " -h ", Host, " -p ", PortStr,
+	     " -d ", Db, " -t -c \"", SQL, "\""]),
+    string:tokens(R, "\n\r\t\s").
+    
 
 c(Cmd, #conf{bin = Bin}) ->
     filename:join(Bin, Cmd).

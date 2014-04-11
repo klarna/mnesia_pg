@@ -3,7 +3,9 @@
 -behaviour(application).
 
 %% Application callbacks
--export([start/2, stop/1]).
+-export([start/2,
+	 stop/1,
+	 start_phase/3]).
 
 %% ===================================================================
 %% Application callbacks
@@ -14,3 +16,11 @@ start(_StartType, _StartArgs) ->
 
 stop(_State) ->
     ok.
+
+start_phase(check_schema_cookie, _, _) ->
+    case mnesia_pg_conns:check_schema_cookie() of
+	ok ->
+	    ok;
+	Error ->
+	    Error
+    end.

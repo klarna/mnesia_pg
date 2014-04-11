@@ -3,6 +3,7 @@
 -behaviour(gen_server).
 -export([start_link/0]).
 -export([alloc/1, free/1, ref/0, state/0]).
+-export([check_schema_cookie/0]).
 -export([init/1, handle_call/3, handle_cast/2,
 	 handle_info/2, code_change/3, terminate/2]).
 
@@ -52,10 +53,13 @@ ref() ->
 state() ->
     gen_server:call(conn_pool, get_state).
 
+check_schema_cookie() ->
+    gen_server:call(conn_pool, check_schema_cookie).
+
 init(Conf) ->
     ConnL = open_connections(Conf),
     io:fwrite("Connection opened~n", []),
-    check_schema_cookie(ConnL),
+    %% check_schema_cookie(ConnL),
     process_flag(trap_exit, true),
     {A1,A2,A3} = now(),
     random:seed(A1, A2, A3),
@@ -76,7 +80,10 @@ handle_call(get_state, _From, State) ->
 handle_call({alloc, _Pid}, _From, {[Conn|ConnL], WaitL}) ->
     {reply, Conn, {ConnL, WaitL}};
 handle_call({alloc, Pid}, _From, {[], WaitL}) ->
-    {reply, wait, {[], lists:append(WaitL,[Pid])}}.
+    {reply, wait, {[], lists:append(WaitL,[Pid])}};
+handle_call(check_schema_cookie, _From, {ConnL, _} = State) ->
+    Result = check_schema_cookie(ConnL),
+    {reply, Result, State}.
 
 handle_cast({free, Conn}, {ConnL, []}) ->
     {noreply, {[Conn|ConnL], []}};
@@ -119,19 +126,22 @@ do_check_schema_cookie(H) ->
 		    io:fwrite("Cookies match!~n", []),
 		    ok;
 		WrongCookie ->
-		    error({schema_cookie_mismatch,{WrongCookie,MyCookie}})
+		    {error,
+		     {schema_cookie_mismatch,{WrongCookie,MyCookie}}}
 	    catch
 		error:_ ->
-		    io:fwrite("cannot decode cookie~n", [])
+		    error(cannot_decode_cookie)
 	    end
     end.
 
 insert_cookie(C, Cookie) ->
+    Bin = term_to_binary(Cookie),
     InsertRes =
 	pgsql:equery(C, ("insert into schema (erlkey, erlval) values"
-			 " ('cookie', $1)"),
-		     [term_to_binary(Cookie)]),
+			 " ('cookie', $1)"), [Bin]),
     io:fwrite("InsertRes = ~p~n", [InsertRes]),
+    File = filename:join(mnesia_monitor:get_env(dir), "cookie.pg"),
+    file:write_file(File, Bin),
     ok.
     
 

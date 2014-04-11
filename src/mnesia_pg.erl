@@ -190,8 +190,7 @@ i_show_table(Curs, Limit) ->
 %% backend management
 
 init_backend() ->
-    application:start(mnesia_pg),
-    ok.
+    application:start(mnesia_pg).
 
 add_aliases(_Aliases) ->
     ok.

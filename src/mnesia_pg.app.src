@@ -8,5 +8,6 @@
                   stdlib
                  ]},
   {mod, {mnesia_pg_app, []}},
+  {start_phases, [{check_schema_cookie,[]}]},
   {env, [{pool_size, 3}, {pg_user, "kred"}, {pg_pwd, "derk"}]}
  ]}.
