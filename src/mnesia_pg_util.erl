@@ -92,7 +92,7 @@ start_db(#conf{status = not_running, dir = PgDir,
     PortStr = integer_to_list(Port),
     PgLog = filename:join(mnesia_monitor:get_env(dir), "pglog"),
     Opts = "-i -h localhost -p " ++ PortStr,
-    cmd([c("pg_ctl", C), "start -D ", PgDir, " -l ", PgLog,
+    cmd([c("pg_ctl", C), " start -D ", PgDir, " -l ", PgLog,
 	 " -w -t 10 -o \"", Opts, "\""]),
     CreateUser =
 	cmd([c("createuser",C), " -h localhost -p ", PortStr,
