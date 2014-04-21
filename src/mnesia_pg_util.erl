@@ -20,7 +20,7 @@ init_env() ->
     Pwd = get_env(pg_pwd, C0#conf.password),
     Db = get_env(pg_db, C0#conf.db),
     Pool = get_env(pool_size, C0#conf.pool_size),
-    PgBin = get_env(pg_bin, "/usr/local/pgsql/bin"),
+    PgBin = get_env(pg_bin, fun get_bin/0),
     Dir = mnesia_monitor:get_env(dir),
     PgDir = get_env(pg_dir, filename:join(Dir, "pgdata")),
     C = #conf{bin  = PgBin,
@@ -92,7 +92,7 @@ start_db(#conf{status = not_running, dir = PgDir,
     PortStr = integer_to_list(Port),
     PgLog = filename:join(mnesia_monitor:get_env(dir), "pglog"),
     Opts = "-i -h localhost -p " ++ PortStr,
-    cmd([c("pg_ctl", C), "start -D ", PgDir, " -l ", PgLog,
+    cmd([c("pg_ctl", C), " start -D ", PgDir, " -l ", PgLog,
 	 " -w -t 10 -o \"", Opts, "\""]),
     CreateUser =
 	cmd([c("createuser",C), " -h localhost -p ", PortStr,
@@ -210,6 +210,25 @@ get_env(K, Default) ->
 	    if is_function(Default, 0) -> Default();
 	       true -> Default
 	    end
+    end.
+
+get_bin() ->
+    RelPath = "pgsql/bin",
+    case code:lib_dir(mnesia_pg) of
+	{error, bad_name} ->
+	    Dir = filename:join(
+		    filename:dirname(
+		      filename:dirname(
+			filename:absname(code:which(?MODULE)))), RelPath),
+	    case filelib:is_regular(
+		  filename:join(Dir, "psql")) of
+		false ->
+		    error(cannot_determine_bin_dir);
+		true ->
+		    Dir
+	    end;
+	Lib ->
+	    filename:join(Lib, RelPath)
     end.
 
 get_port() ->
