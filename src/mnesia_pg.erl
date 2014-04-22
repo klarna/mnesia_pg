@@ -624,12 +624,12 @@ do_select(Ref, Tab, MS, AccKeys, Limit) when is_boolean(AccKeys) ->
 	<<>> ->
 	    with_iterator(Ref,
 			  fun(Curs) ->
-				  select_traverse(fetch_next(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
+				  select_traverse(fetch_next_n(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
 			  end);
 	_ ->
 	    with_positioned_iterator(Ref, Pfx,
 				     fun(Curs) ->
-					     select_traverse(fetch_next(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
+					     select_traverse(fetch_next_n(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
 				     end)
     end.
 
@@ -652,19 +652,23 @@ extract_vars(_) ->
 intersection(A,B) when is_list(A), is_list(B) ->
     A -- (A -- B).
 
-select_traverse({ok, K, V}, Curs, Limit, Pfx, MS, Sel,
+select_traverse([_|_] = L, Curs, Limit, Pfx, MS, Sel,
 		AccKeys, Acc) ->
+    select_traverse_(L, Curs, Limit, Pfx, MS, Sel, AccKeys, Acc);
+select_traverse([], _, _, _, _, _, _, Acc) ->
+    {lists:reverse(Acc), '$end_of_table'}.
+
+select_traverse_([{K,V}|T], Curs, Limit, Pfx, MS, Sel, AccKeys, Acc) ->
     case is_prefix(Pfx, K) of
 	true ->
 	    Rec = decode_val(V),
 	    case ets:match_spec_run([Rec], MS) of
 		[] ->
-		    select_traverse(fetch_next(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, Acc);
+		    select_traverse_(T, Curs, Limit, Pfx, MS, Sel, AccKeys, Acc);
 		[Match] ->
                     Fun = fun(NewLimit, NewAcc) ->
-                                  select_traverse(fetch_next(Curs), Curs,
-                                                  NewLimit, Pfx, MS, Sel,
-                                                  AccKeys, NewAcc)
+                                  select_traverse_(
+				    T, Curs, NewLimit, Pfx, MS, Sel, AccKeys, NewAcc)
                           end,
 		    Acc1 = if AccKeys ->
 				   [{K, Match}|Acc];
@@ -676,8 +680,10 @@ select_traverse({ok, K, V}, Curs, Limit, Pfx, MS, Sel,
 	false ->
 	    {lists:reverse(Acc), '$end_of_table'}
     end;
-select_traverse(void, _, _, _, _, _, _, Acc) ->
-    {lists:reverse(Acc), '$end_of_table'}.
+select_traverse_([], Curs, Limit, Pfx, MS, Sel, AccKeys, Acc) ->
+    select_traverse_(fetch_next_n(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, Acc).
+
+
 
 is_prefix(A, B) when is_binary(A), is_binary(B) ->
     Sa = byte_size(A),
@@ -854,6 +860,19 @@ fetch_next({C, CursorName}) ->
 	    void;
 	{ok, 1, _, [R]} ->
 	    {ok, element(1, R), element(2, R)}
+    end.
+
+fetch_next_n(C) ->
+    fetch_next_n(30, C).
+
+fetch_next_n(N, {C, CursorName}) ->
+    Res = pgsql:equery(C, ["fetch next ", integer_to_list(N),
+			   " from ", CursorName], []),
+    case Res of
+	{ok, 0} ->
+	    [];
+	{ok, _, _, Rows} ->
+	    [{element(1, R), element(2, R)} || R <- Rows]
     end.
 
 %pgsql:equery(C, "insert into " ++ Tab ++ " (erlkey,erlval,change_time) values ($1,$2,CURRENT_TIMESTAMP)", [PKey,Val]),
