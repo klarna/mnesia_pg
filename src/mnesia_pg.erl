@@ -480,6 +480,26 @@ last(Alias, Tab0) ->
 	mnesia_pg_conns:free(C)
     end.
 
+prefix_get({C, Tab}, IsPfx, Pfx) ->
+    {Where,Vs} = case IsPfx of
+		     true  -> {"erlkey >= $1", [Pfx]};
+		     false -> {"erlkey = $1", [Pfx]}
+		  end,
+    {ok, _, Res} =
+	pgsql:equery(C, ["select erlkey, erlval from ", Tab, " where ",
+			 Where, " order by erlkey limit 2"], Vs),
+    Res.
+
+prefix_next({C, Tab}, IsPfx, Pfx) ->
+    {Where,Vs} = case IsPfx of
+		     true  -> {"erlkey >= $1", [Pfx]};
+		     false -> {"erlkey > $1", [Pfx]}
+		  end,
+    {ok, _, Res} =
+	pgsql:equery(C, ["select erlkey, erlval from ", Tab, " where ",
+			 Where, " order by erlkey limit 2"], Vs),
+    Res.
+
 repair_continuation(Cont, _Ms) ->
     Cont.
 
@@ -618,20 +638,22 @@ do_select(Ref, Tab, MS, AccKeys, Limit) when is_boolean(AccKeys) ->
     Sel = #sel{ref = Ref,
 	       keypat = Keypat,
 	       limit = Limit},
-    {Pfx, _} = Keypat,
+    {IsPfx, Pfx, _} = Keypat,
     CompMS = ets:match_spec_compile(MS),
-    case (Pfx) of
-	<<>> ->
-	    with_iterator(Ref,
-			  fun(Curs) ->
-				  select_traverse(fetch_next_n(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
-			  end);
-	_ ->
-	    with_positioned_iterator(Ref, Pfx,
-				     fun(Curs) ->
-					     select_traverse(fetch_next_n(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
-				     end)
-    end.
+    select_traverse(prefix_get(Ref, IsPfx, Pfx), Ref, Limit, Pfx, IsPfx, Pfx,
+		    CompMS, Sel, AccKeys, []).
+    %% case (Pfx) of
+    %% 	<<>> ->
+    %% 	    with_iterator(Ref,
+    %% 			  fun(Curs) ->
+    %% 				  select_traverse(fetch_next_n(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
+    %% 			  end);
+    %% 	_ ->
+    %% 	    with_positioned_iterator(Ref, Pfx,
+    %% 				     fun(Curs) ->
+    %% 					     select_traverse(fetch_next_n(Curs), Curs, Limit, Pfx, CompMS, Sel, AccKeys, [])
+    %% 				     end)
+    %% end.
 
 extract_vars([H|T]) ->
     extract_vars(H) ++ extract_vars(T);
@@ -652,23 +674,24 @@ extract_vars(_) ->
 intersection(A,B) when is_list(A), is_list(B) ->
     A -- (A -- B).
 
-select_traverse([_|_] = L, Curs, Limit, Pfx, MS, Sel,
-		AccKeys, Acc) ->
-    select_traverse_(L, Curs, Limit, Pfx, MS, Sel, AccKeys, Acc);
-select_traverse([], _, _, _, _, _, _, Acc) ->
+select_traverse([_|_] = L, Curs, Limit, Pfx, IsPfx, Prev, MS, Sel, AccKeys, Acc) ->
+    select_traverse_(L, Curs, Limit, Pfx, IsPfx, Prev, MS, Sel, AccKeys, Acc);
+select_traverse([], _, _, _, _, _, _, _, _, Acc) ->
     {lists:reverse(Acc), '$end_of_table'}.
 
-select_traverse_([{K,V}|T], Curs, Limit, Pfx, MS, Sel, AccKeys, Acc) ->
+select_traverse_([{K,V}|T], Curs, Limit, Pfx, _, Prev, MS, Sel, AccKeys, Acc) ->
     case is_prefix(Pfx, K) of
 	true ->
 	    Rec = decode_val(V),
 	    case ets:match_spec_run([Rec], MS) of
 		[] ->
-		    select_traverse_(T, Curs, Limit, Pfx, MS, Sel, AccKeys, Acc);
+		    select_traverse_(T, Curs, Limit, Pfx, false, K,
+				     MS, Sel, AccKeys, Acc);
 		[Match] ->
                     Fun = fun(NewLimit, NewAcc) ->
                                   select_traverse_(
-				    T, Curs, NewLimit, Pfx, MS, Sel, AccKeys, NewAcc)
+				    T, Curs, NewLimit, Pfx, false, K,
+				    MS, Sel, AccKeys, NewAcc)
                           end,
 		    Acc1 = if AccKeys ->
 				   [{K, Match}|Acc];
@@ -680,8 +703,9 @@ select_traverse_([{K,V}|T], Curs, Limit, Pfx, MS, Sel, AccKeys, Acc) ->
 	false ->
 	    {lists:reverse(Acc), '$end_of_table'}
     end;
-select_traverse_([], Curs, Limit, Pfx, MS, Sel, AccKeys, Acc) ->
-    select_traverse_(fetch_next_n(Curs), Curs, Limit, Pfx, MS, Sel, AccKeys, Acc).
+select_traverse_([], Curs, Limit, Pfx, IsPfx, Prev, MS, Sel, AccKeys, Acc) ->
+    select_traverse(prefix_next(Curs, IsPfx, Prev),
+		    Curs, Limit, Pfx, IsPfx, Prev, MS, Sel, AccKeys, Acc).
 
 
 
@@ -714,10 +738,10 @@ keypat([{HeadPat,Gs,_}|_], KeyPos) when is_tuple(HeadPat) ->
     KP      = element(KeyPos, HeadPat),
     KeyVars = extract_vars(KP),
     Guards  = relevant_guards(Gs, KeyVars),
-    Pfx     = mnesia_sext:prefix_sb32(KP),
-    {Pfx, [{KP, Guards, [true]}]};
+    {IsPfx,Pfx} = mnesia_sext:enc_prefix_sb32(KP),
+    {IsPfx, Pfx, [{KP, Guards, [true]}]};
 keypat(_, _) ->
-    {<<>>, [{'_',[],[true]}]}.
+    {true, <<>>, [{'_',[],[true]}]}.
 
 relevant_guards(Gs, Vars) ->
     case Vars -- ['_'] of
@@ -772,6 +796,9 @@ keypos(Tab) when is_atom(Tab) ->
 encode_primary_key(Key) ->
     <<PK:160>> = crypto:sha(term_to_binary(Key)),
     PK.
+
+encode_key_prefix(Key) ->
+    mnesia_sext:enc_prefix_sb32(Key).
 
 encode_key(Key) ->
     mnesia_sext:encode_sb32(Key).
@@ -842,7 +869,7 @@ open_cursor(C, Tab) ->
 open_cursor(C, Tab, Pat) ->
     CursorName = "cursor_" ++ Tab ++ integer_to_list(mnesia_pg_conns:ref()),
     {ok, [], []} = pgsql:squery(C, "begin"),
-    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select erlkey,erlval from ", Tab, " where erlkey like '", Pat, "%' order by erlkey asc"]),
+    {ok, [], []} = pgsql:squery(C, ["declare ", CursorName, " cursor for select erlkey,erlval from ", Tab, " where erlkey >= '", Pat, "' order by erlkey asc"]),
     {C, CursorName}.
 
 commit_cursor({C, CursorName}) ->
@@ -863,10 +890,10 @@ fetch_next({C, CursorName}) ->
     end.
 
 fetch_next_n(C) ->
-    fetch_next_n(30, C).
+    fetch_next_n(1, C).
 
 fetch_next_n(N, {C, CursorName}) ->
-    Res = pgsql:equery(C, ["fetch next ", integer_to_list(N),
+    Res = pgsql:equery(C, ["fetch ", integer_to_list(N),
 			   " from ", CursorName], []),
     case Res of
 	{ok, 0} ->
