@@ -377,22 +377,29 @@ insert(Alias, Tab, Obj) ->
     Pos = keypos(Tab),
     Key = element(Pos, Obj),
     PKey = encode_key(Key),
+    SKey = encode_lookup_key(Key),
     Val = encode_val(Obj),
-    upsert_into(Alias, Tab, PKey, Val).
+    upsert_into(Alias, Tab, PKey, SKey, Val).
+
+find_row(_, _, []) ->
+    [];
+find_row(_, _, [Row]) ->
+    [decode_val(element(1,Row))];
+find_row(Key, Pos, [Row|Rs]) ->
+    Rec = decode_val(element(1,Row)),
+    case element(Pos, Rec) of
+	Key ->
+	    [Rec];
+	_ ->
+	    find_row(Key, Pos, Rs)
+    end.
 
 lookup(Alias, Tab0, Key) ->
     {C, Tab} = get_ref(Alias, Tab0),
-    PKey = encode_key(Key),
+    SKey = encode_lookup_key(Key),
     try
-	{ok, _, Rs} = pgsql:equery(C, ["select erlval from ", Tab, " where erlkey=$1"], [PKey]),
-	N = length(Rs),
-	case (N) of
-	    0 ->
-		[];
-	    1 ->
-		[Row] = Rs,
-		[decode_val(element(1, Row))]
-	end
+	{ok, _, Rs} = pgsql:equery(C, ["select erlval from ", Tab, " where erlhash=$1"], [SKey]),
+	find_row(Key, keypos(Tab0), Rs)
     after
 	mnesia_pg_conns:free(C)
     end.
@@ -793,9 +800,8 @@ keypos({_, retainer, _}) ->
 keypos(Tab) when is_atom(Tab) ->
     2.
 
-encode_primary_key(Key) ->
-    <<PK:160>> = crypto:sha(term_to_binary(Key)),
-    PK.
+encode_lookup_key(Key) ->
+    erlang:phash2(Key).			   % not necessarily unique, but good for lookups
 
 encode_key_prefix(Key) ->
     mnesia_sext:enc_prefix_sb32(Key).
@@ -903,10 +909,10 @@ fetch_next_n(N, {C, CursorName}) ->
     end.
 
 %pgsql:equery(C, "insert into " ++ Tab ++ " (erlkey,erlval,change_time) values ($1,$2,CURRENT_TIMESTAMP)", [PKey,Val]),
-upsert_into(Alias, Tab0, PKey, Val) ->
+upsert_into(Alias, Tab0, PKey, SKey, Val) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	{ok, _, _} = pgsql:equery(C, ["select upsert_", Tab, "($1,$2)"], [PKey,Val]),
+	{ok, _, _} = pgsql:equery(C, ["select upsert_", Tab, "($1,$2,$3)"], [PKey,SKey,Val]),
 	ok
     after
 	mnesia_pg_conns:free(C)
@@ -962,14 +968,16 @@ delete_from_pattern(Alias, Tab0, Pat) ->
 create_table(Alias, Tab0, _Props) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(ekey character varying, eval bytea)"]),
+	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(ekey character varying, ehash bigint, eval bytea)"]),
+	pgsql:squery(C, ["drop index if exists ", Tab, "_term_idx"]),	
 	pgsql:squery(C, ["drop table if exists ", Tab]),
-	{ok, [], []} = pgsql:squery(C, ["create table ", Tab, "( erlkey character varying(2048) primary key, erlval bytea not null, change_time timestamp not null )"]),
-	{ok, [], []} = pgsql:squery(C, ["create function upsert_", Tab, "(ekey character varying, eval bytea) RETURNS void AS\n",
-					"$$\n", "BEGIN\n", " INSERT INTO ", Tab, " VALUES (ekey, eval, current_timestamp);\n",
+	{ok, [], []} = pgsql:squery(C, ["create table ", Tab, "( erlkey character varying(2048) primary key, erlhash bigint not null, erlval bytea not null, change_time timestamp not null )"]),
+	{ok, [], []} = pgsql:squery(C, ["create function upsert_", Tab, "(ekey character varying, ehash bigint, eval bytea) RETURNS void AS\n",
+					"$$\n", "BEGIN\n", " INSERT INTO ", Tab, " VALUES (ekey, ehash, eval, current_timestamp);\n",
 					"EXCEPTION WHEN unique_violation THEN\n",
-					" UPDATE ", Tab, " SET erlval=eval, change_time=current_timestamp WHERE erlkey = ekey;\n",
+					" UPDATE ", Tab, " SET erlval=eval, erlhash=ehash, change_time=current_timestamp WHERE erlkey = ekey;\n",
 					"END;\n", "$$\n", "LANGUAGE plpgsql;"]),
+	{ok, [], []} = pgsql:squery(C, ["create index ", Tab, "_term_idx on " ++ Tab ++ " using hash (erlhash)"]),
 	ok
     after 
 	mnesia_pg_conns:free(C)
@@ -978,7 +986,7 @@ create_table(Alias, Tab0, _Props) ->
 delete_table(Alias, Tab0) ->
     {C, Tab} = get_ref(Alias, Tab0),
     try
-	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(ekey character varying, eval bytea)"]),
+	pgsql:squery(C, ["drop function if exists upsert_", Tab, "(ekey character varying, ehash bigint, eval bytea)"]),
 	pgsql:squery(C, ["drop table if exists ", Tab])
     after
 	mnesia_pg_conns:free(C)
