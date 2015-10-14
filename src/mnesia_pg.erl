@@ -307,8 +307,6 @@ info(Alias, Tab, memory) ->
 info(_Alias, _Tab, _) ->
     undefined.
 
-%% table synch calls, not used in KRED
-
 %% ===========================================================
 %% Table synch protocol
 %% Callbacks are

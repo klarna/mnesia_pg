@@ -1,4 +1,4 @@
-# Makefile for building an Erlang application (with Kred-specific additions)
+# Makefile for building an Erlang application
 # Usage: make -C <app-directory> -f stdapp.mk [target]
 #
 # Targets:
@@ -10,6 +10,15 @@
 #   realclean
 #   clean-tests
 #   clean-docs
+#
+# Running 'make -f stdapp.mk' in an empty directory will create the file
+# src/APPLICATION.app.src, taking the application name from the directory
+# name. You can override this using 'make APPLICATION=... -f stdapp.mk'.
+# Once the src/*.app.src (or ebin/*.app) file exists, the name of that file
+# will be used for the application name. When compiling an Erlang program
+# using stdapp.mk, the macro ?APPLICATION will be automatically defined. You
+# can override the name of this macro to avoid collisions by setting the
+# make variable APPLICATION_NAME_MACRO.
 #
 # The following is an example of a minimal top level Makefile for building
 # all applications in the lib/ subdirectory:
@@ -26,10 +35,16 @@
 #
 # Run "make build-foo" to build only the application foo. Add similar rules
 # for other targets like tests-foo, docs-foo, clean-foo, etc. Any specific
-# APPNAME.mk files are expected to be in $(TOP_DIR)/apps/. If you don't pass
-# ERL_DEPS_DIR, the .d files will be placed in the ebin directory of the
+# APPLICATION.mk files are expected to be in $(TOP_DIR)/apps/. If you don't
+# pass ERL_DEPS_DIR, the .d files will be placed in the ebin directory of the
 # app. Note that the $(MAKE) call runs from the app subdirectory, so it's
 # best to use absolute paths based on TOP_DIR for the parameters.
+#
+# * define STDAPP_NO_GIT_TAG if you don't want to compute git tags
+# * define STDAPP_FORCE_GIT_TAG_VSN if you want to always use git tags as vsn
+# * define STDAPP_NO_VSN_MK if you want to ignore any vsn.mk files
+# * define STDAPP_VSN_ADD_GIT_HASH if you want to add a git hash suffix
+#   to the vsn (unless the vsn is equal to the git tag)
 #
 # Copyright (C) 2014 Klarna AB
 #
@@ -74,12 +89,29 @@ DOC_DIR ?= doc
 TEST_DIR ?= test
 BIN_DIR ?= bin
 ERL_DEPS_DIR ?= $(EBIN_DIR)
-APPNAME ?= $(notdir $(CURDIR))
-APP_FILE ?= $(EBIN_DIR)/$(APPNAME).app
-APP_SRC_FILE ?= $(SRC_DIR)/$(APPNAME).app.src
 PROGRESS ?= @echo -n '.'
 GAWK ?= gawk
 DEFAULT_VSN ?= 0.1
+
+# figure out the application name, unless APPLICATION is already set
+# (first check for src/*.app.src, then ebin/*.app, otherwise use the dirname)
+ifndef APPLICATION
+  appsrc = $(wildcard $(SRC_DIR)/*.app.src)
+  ifneq ($(appsrc),)
+    APPLICATION := $(patsubst $(SRC_DIR)/%.app.src,%,$(appsrc))
+  else
+    appfile = $(wildcard $(EBIN_DIR)/*.app)
+    ifneq ($(appfile),)
+      APPLICATION := $(patsubst $(EBIN_DIR)/%.app,%,$(appfile))
+    else
+      APPLICATION := $(notdir $(CURDIR))
+    endif
+  endif
+endif
+export APPLICATION
+APP_SRC_FILE ?= $(SRC_DIR)/$(APPLICATION).app.src
+APP_FILE ?= $(EBIN_DIR)/$(APPLICATION).app
+APPLICATION_NAME_MACRO ?= APPLICATION
 
 # ensure that all applications under lib are available to erlc when building
 ERL_LIBS ?= $(LIB_DIR)
@@ -92,32 +124,53 @@ ERL_SOURCES := $(wildcard $(SRC_DIR)/*.erl $(SRC_DIR)/*/*.erl \
 		 $(SRC_DIR)/*/*/*.erl)
 ERL_TEST_SOURCES := $(wildcard $(TEST_DIR)/*.erl $(TEST_DIR)/*/*.erl)
 
-# Kred business objects
-BO_HEADER := $(LIB_DIR)/bos_utilities/priv/bo.edoc
-BO_SOURCES := $(wildcard $(SRC_DIR)/*_bo.erl.in)
-
-
 # read any vsn.mk for backwards compatibility with many existing applications
 # NOTE: if you use vsn.mk, then add a .app file dependency like the following:
 #
-#   VSN=1.0
 #   $(APP_FILE): vsn.mk
 #
+ifndef STDAPP_NO_VSN_MK
 -include ./vsn.mk
+  ifndef VSN
+    # some apps define the <APPNAME>_VSN varable instead
+    vsnvar=$(shell echo $(APPLICATION) | tr a-z A-Z)_VSN
+    ifdef $(vsnvar)
+      VSN := $($(vsnvar))
+    endif
+  endif
+endif
+
+ifdef STDAPP_NO_GIT_TAG
+  GIT_TAG :=
+else
+  ifdef STDAPP_VSN_ADD_GIT_HASH
+    longdesc=--long
+  endif
+  GIT_TAG := $(shell git describe --tags --always $(longdesc))
+  ifdef STDAPP_FORCE_GIT_TAG_VSN
+    VSN := $(GIT_TAG)
+  endif
+endif
+
+# if VSN not yet defined, get nonempty vsn from any existing .app.src or
+# .app file, use git tag, if any, or default (note that sed regexp matching
+# is greedy, so the rightmost {vsn, "..."} in the input will be selected)
+ifndef VSN
+  VSN := $(shell echo '{vsn,"$(DEFAULT_VSN)"}' `cat $(APP_FILE) 2> /dev/null` '{vsn,"$(GIT_TAG)"}' `cat $(APP_SRC_FILE) 2> /dev/null` | sed -n 's/.*{[[:space:]]*vsn[[:space:]]*,[[:space:]]*"\([^"][^"]*\)".*/\1/p')
+endif
+
+ifdef STDAPP_VSN_ADD_GIT_HASH
+  ifneq ($(VSN),$(GIT_TAG))
+    VSN := $(VSN)-g$(shell git rev-parse --short HEAD)
+  endif
+endif
 
 # read any application-specific definitions and rules
 -include ./app.mk
 
 # read any system-specific definitions and rules for the application
 # (use the -I flag with Make to specify the directory for these files)
-export APPNAME
--include apps/$(APPNAME).mk
-
-
-# if VSN not yet defined, get nonempty vsn from any existing .app.src or
-# .app file, use git tag, if any, or default (note that sed regexp matching
-# is greedy, so the rightmost {vsn, "..."} in the input will be selected)
-VSN ?= $(shell echo '{vsn,"$(DEFAULT_VSN)"}' '{vsn,"$(shell git describe --tags --always)"}' `cat $(APP_FILE) $(APP_SRC_FILE) 2> /dev/null` | sed -n 's/.*{vsn,[ 	]*"\([^"][^"]*\)".*/\1/p')
+-include apps/$(APPLICATION).mk
 
 # ensure sane default values if not already defined at this point
 ERLC_FLAGS ?= +debug_info +warn_obsolete_guard +warn_export_all
@@ -126,7 +179,7 @@ EDOC_OPTS ?= {def,{version,"$(VSN)"}},todo,no_packages
 
 # automatically add the include directory to erlc options (the src directory
 # is added so that modules under test/ can be compiled using the same rule)
-ERLC_FLAGS += -I $(INCLUDE_DIR) -I $(SRC_DIR)
+ERLC_FLAGS += -I $(INCLUDE_DIR) -I $(SRC_DIR) -D$(APPLICATION_NAME_MACRO)="$(APPLICATION)"
 
 # computed targets
 YRL_OBJECTS := $(YRL_SOURCES:%.yrl=%.erl)
@@ -195,7 +248,7 @@ BO_FIELDS_EDOC :=  $(patsubst $(SRC_DIR)/%_bo.erl, $(DOC_DIR)/%_bo_fields.edoc, 
 $(DOC_DIR)/edoc-info: $(ERL_SOURCES) $(wildcard $(DOC_DIR)/*.edoc) \
 			$(BO_FIELDS_EDOC)
 	$(PROGRESS)
-	cd $(SRC_DIR) && $(ERL_NOSHELL) -eval 'edoc:application($(APPNAME), "..", [$(EDOC_OPTS)]), init:stop().'
+	cd $(SRC_DIR) && $(ERL_NOSHELL) -eval 'edoc:application($(APPLICATION), "..", [$(EDOC_OPTS)]), init:stop().'
 
 .PHONY: clean-docs
 clean-docs:
@@ -205,9 +258,9 @@ clean-docs:
 # (note the special sed loop here to merge any multi-line modules declarations)
 $(APP_FILE): $(APP_SRC_FILE) | $(EBIN_DIR)
 	$(PROGRESS)
-	sed -e 's/{vsn,[ 	]*\({[^}]*}\)\?[^}]*}/{vsn, "$(VSN)"}/' \
-	    -e ':x;/{modules,[ 	]*[^}]*$$/{N;b x}' \
-	    -e "s/{modules,[ 	]*[^}]*}/{modules, [$(MODULES_LIST)]}/" \
+	sed -e 's/{[[:space:]]*vsn[[:space:]]*,[[:space:]]*\({[^}]*}\)\?[^}]*}/{vsn, "$(VSN)"}/' \
+	    -e ':x;/{[[:space:]]*modules[[:space:]]*,[[:space:]]*[^}]*$$/{N;b x}' \
+	    -e "s/{[[:space:]]*modules[[:space:]]*,[[:space:]]*[^}]*}/{modules, [$(MODULES_LIST)]}/" \
 	    $< > $@
 
 # create a new .app.src file, or just clone the .app file if it already exists
@@ -215,16 +268,16 @@ $(APP_FILE): $(APP_SRC_FILE) | $(EBIN_DIR)
 $(APP_SRC_FILE):
 	$(PROGRESS)
 	mkdir -p $(dir $@)
-	echo >  $@ '{application,$(APPNAME),'
-	echo >> $@ ' [{description,"The $(APPNAME) application"},'
+	echo >  $@ '{application,$(APPLICATION),'
+	echo >> $@ ' [{description,"The $(APPLICATION) application"},'
 	echo >> $@ '  {vsn,"$(VSN)"},'
-	echo >> $@ '% {mod,{$(APPNAME)_app,[]}},'
+	echo >> $@ '% {mod,{$(APPLICATION)_app,[]}},'
 	echo >> $@ '  {modules,[]},'
 	echo >> $@ '  {registered, []},'
 	echo >> $@ '  {applications,[kernel,stdlib]},'
 	echo >> $@ '  {env, []}'
 	echo >> $@ ' ]}.'
-	if [ -f $(APP_FILE) ]; then sed -e 's/{vsn,[ 	]*[^}]*}/{vsn, "$(VSN)"}/' $(APP_FILE) > $(@); fi
+	if [ -f $(APP_FILE) ]; then sed -e 's/{[[:space:]]*vsn[[:space:]]*,[[:space:]]*[^}]*}/{vsn, "$(VSN)"}/' $(APP_FILE) > $(@); fi
 
 # ensuring that target directories exist; use order-only prerequisites for this
 $(sort $(EBIN_DIR) $(ERL_DEPS_DIR)):
@@ -250,25 +303,3 @@ $(ERL_DEPS_DIR)/%.d: %.erl | $(ERL_DEPS_DIR)
 	$(PROGRESS)
 	$(ERLC) $(ERLC_FLAGS) -o $(ERL_DEPS_DIR) -MP -MG -MF $@ -MT "$(EBIN_DIR)/$*.beam $@" $<
 	$(GAWK) '/^[ \t]*-(behaviou?r\(|compile\({parse_transform,)/ {match($$0, /-(behaviou?r\([ \t]*([^) \t]+)|compile\({parse_transform,[ \t]*([^} \t]+))/, a); m = (a[2] a[3]); if (m != "" && (getline x < ("$(SRC_DIR)/" m ".erl")) >= 0 || (getline x < ("$(TEST_DIR)/" m ".erl")) >= 0) print "\n$(EBIN_DIR)/$*.beam: $(EBIN_DIR)/" m ".beam"}' < $< >> $@
-
-# Kred business objects
-$(DOC_DIR)/%_fields.edoc: $(EBIN_DIR)/%.beam \
-		$(LIB_DIR)/bos_utilities/ebin/document_bos.beam $(BO_HEADER)
-	$(PROGRESS)
-	$(ERL_NOSHELL) -run document_bos generate_edoc \
-	  $(patsubst $(EBIN_DIR)/%.beam, %, $<) $@ $(BO_HEADER)
-
-%_bo.erl: %_bo.erl.in $(LIB_DIR)/bos_utilities/include/bo_exports.hrl \
-		$(LIB_DIR)/bos_utilities/include/bo_template.hrl
-	$(PROGRESS)
-	sed -e '1 i\' \
-	    -e '%%% This file is generated. DO NOT EDIT.' \
-	    -e '/-include[^(]*("bos_utilities\/include\/bo_exports.hrl")\./ {'\
-	    -e 's/.*//' \
-	    -e 'r $(LIB_DIR)/bos_utilities/include/bo_exports.hrl' \
-	    -e '}' \
-	    -e '/-include[^(]*("bos_utilities\/include\/bo_template.hrl")\./ {' \
-	    -e 's/.*//' \
-	    -e 'r $(LIB_DIR)/bos_utilities/include/bo_template.hrl' \
-	    -e '}' $< | \
-	sed 's/^$$/\n%%%. --------------- G E N E R A T E D   F I L E --------------- %%%./' > $@

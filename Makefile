@@ -1,6 +1,7 @@
 include ./stdapp.mk
 
 PSQL_TARGET=$(PWD)/pgsql
+APPLICATION_NAME_MACRO=APPNAME
 
 .PHONY: build-pgsql clean-pgsql
 build: build-pgsql
