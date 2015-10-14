@@ -1,3 +1,20 @@
+%%%
+%%% Copyright (c) 2014-2015 Klarna AB
+%%%
+%%% This file is provided to you under the Apache License,
+%%% Version 2.0 (the "License"); you may not use this file
+%%% except in compliance with the License.  You may obtain
+%%% a copy of the License at
+%%%
+%%%   http://www.apache.org/licenses/LICENSE-2.0
+%%%
+%%% Unless required by applicable law or agreed to in writing,
+%%% software distributed under the License is distributed on an
+%%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%%% KIND, either express or implied.  See the License for the
+%%% specific language governing permissions and limitations
+%%% under the License.
+
 %% This module uses the proper_statem pattern to generate random
 %% sequences of commands, mixing dirty and transaction operations
 %% (including dirty ops from within transactions). Each sequence is run
@@ -5,8 +22,7 @@
 %% which the result of each operation in the sequence is compared between
 %% the two runs. The postcondition is that every command in every sequence
 %% should yield the same value against both backends.
-%% 
-%% @end
+
 -module(pg_proper_semantics).
 
 -export([test/0,
@@ -83,7 +99,7 @@ command(#st{}) ->
 
 type() ->
     proper_types:oneof([async_dirty, transaction]).
-    
+
 precondition(_, _) ->
     true.
 
@@ -95,7 +111,7 @@ postcondition(_, _, _) ->
 next_state(St, _, _) ->
     St.
 
-sequence() ->	
+sequence() ->
     proper_types:list(db_cmd()).
 
 db_cmd() ->
